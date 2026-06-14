@@ -13,6 +13,8 @@ from .p0_features import install_p0_features
 from .security import RequestContext
 from .services import LawPlatform
 from .store import Store
+from .ux_features import install_ux_features
+from .ux_views_v2 import desktop_html, mobile_clue_html, mobile_notification_html, mobile_upload_html
 
 
 class CaseCreate(BaseModel):
@@ -139,6 +141,7 @@ def model_data(model: BaseModel) -> dict[str, Any]:
 def create_app(store: Store | None = None) -> FastAPI:
     store = store or Store(Path(".runtime/law_platform_store.json"))
     install_p0_features()
+    install_ux_features()
     platform = LawPlatform(store)
     app = FastAPI(title="Execution Case Asset Clue Workspace", version="0.1.0")
     app.state.platform = platform
@@ -170,11 +173,19 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return DESKTOP_HTML
+        return desktop_html()
 
     @app.get("/mobile/notifications/{notification_id}", response_class=HTMLResponse)
     def mobile_notification_view(notification_id: str) -> str:
-        return MOBILE_HTML.replace("__NOTIFICATION_ID__", notification_id)
+        return mobile_notification_html(notification_id)
+
+    @app.get("/mobile/clues/{clue_id}", response_class=HTMLResponse)
+    def mobile_clue_view(clue_id: str) -> str:
+        return mobile_clue_html(clue_id)
+
+    @app.get("/mobile/cases/{case_id}/upload", response_class=HTMLResponse)
+    def mobile_upload_view(case_id: str) -> str:
+        return mobile_upload_html(case_id)
 
     @app.get("/healthz")
     def healthz(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
@@ -314,9 +325,25 @@ def create_app(store: Store | None = None) -> FastAPI:
     def case_overview(case_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.case_overview(context, case_id))
 
+    @app.get("/bff/home")
+    def home_dashboard(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.home_dashboard(context))
+
+    @app.get("/bff/cases/{case_id}/workspace")
+    def case_workspace(case_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.case_workspace(context, case_id))
+
     @app.get("/bff/mobile/notifications/{notification_id}")
     def mobile_notification(notification_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.mobile_notification(context, notification_id))
+
+    @app.get("/bff/mobile/clues/{clue_id}")
+    def mobile_clue(clue_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.mobile_clue(context, clue_id))
+
+    @app.get("/bff/mobile/cases/{case_id}/upload-context")
+    def mobile_upload_context(case_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.mobile_case_upload_context(context, case_id))
 
     @app.post("/api/reports/{report_id}/review")
     def review_report(report_id: str, payload: ReportReview, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
