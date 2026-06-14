@@ -60,6 +60,8 @@ def seed_data() -> dict[str, list[dict[str, Any]]]:
         "monitor_events": [],
         "notifications": [],
         "notification_deliveries": [],
+        "jobs": [],
+        "connector_alerts": [],
         "tasks": [],
         "plugin_registry": [],
         "plugin_runs": [],

@@ -8,6 +8,7 @@ from .models import money_to_text, new_id, now_iso
 from .report_export import render_report_export
 from .scoring import score_external_record, total_score
 from .services import LawPlatform
+from .worker import active_job_exists, complete_job, due_jobs, enqueue_job, fail_job, start_job
 
 _ORIGINAL_UPLOAD_FILE = LawPlatform.upload_file
 _ORIGINAL_RESOLVE_SUBJECT = LawPlatform.resolve_subject
@@ -28,6 +29,12 @@ def install_p0_features() -> None:
     LawPlatform.export_report = export_report
     LawPlatform.create_monitor_target = create_monitor_target
     LawPlatform.run_monitor_check = run_monitor_check
+    LawPlatform.create_manual_external_record = create_manual_external_record
+    LawPlatform.list_connector_alerts = list_connector_alerts
+    LawPlatform.resolve_connector_alert = resolve_connector_alert
+    LawPlatform.schedule_monitor_jobs = schedule_monitor_jobs
+    LawPlatform.run_due_jobs = run_due_jobs
+    LawPlatform.list_jobs = list_jobs
     LawPlatform.case_overview = case_overview
     LawPlatform._create_monitor_event = create_monitor_event_with_deliveries
     LawPlatform._create_notification = create_notification
@@ -108,23 +115,62 @@ def generate_asset_clue_report(self: LawPlatform, ctx, case_id: str, payload: di
     template = payload.get("report_template", "execution_asset_clue_v1")
     template_check = self.plugins.run_contract_tests(template)
     if template_check["status"] != "passed":
-        raise AppError("VALIDATION_ERROR", "报告模板未通过契约测试", 400, template_check)
+        raise AppError("VALIDATION_ERROR", "Report template did not pass contract tests", 400, template_check)
     records: list[dict[str, Any]] = []
     runs: list[dict[str, Any]] = []
+    connector_warnings: list[dict[str, Any]] = []
     for connector_id in connector_ids:
-        run, new_records = self.plugins.execute_connector(connector_id, ctx.tenant_id, case, subject, ctx.actor_id)
+        try:
+            run, new_records = self.plugins.execute_connector(connector_id, ctx.tenant_id, case, subject, ctx.actor_id)
+        except AppError as exc:
+            if exc.code != "CONNECTOR_UNAVAILABLE":
+                raise
+            alert = create_connector_alert(self, ctx, case, subject, connector_id, exc)
+            retry_job = enqueue_job(
+                self.store,
+                ctx.tenant_id,
+                case["id"],
+                "connector_retry",
+                {"connector_id": connector_id, "subject_id": subject["id"], "alert_id": alert["id"], "report_template": template},
+                ctx.actor_id,
+                max_attempts=3,
+            )
+            alert = self.store.update("connector_alerts", alert["id"], {"retry_job_id": retry_job["id"], "updated_at": now_iso()})
+            connector_warnings.append(
+                {"connector_id": connector_id, "alert_id": alert["id"], "retry_job_id": retry_job["id"], "error_code": exc.code, "message": exc.message}
+            )
+            continue
         runs.append(run)
         for record in new_records:
             self.store.insert("external_records", record)
         records.extend(new_records)
+    if not records:
+        raise AppError(
+            "CONNECTOR_UNAVAILABLE",
+            "All selected connectors are unavailable; use manual external record fallback.",
+            503,
+            {"connector_warnings": connector_warnings},
+        )
     clues: list[dict[str, Any]] = []
     for record in records:
         clues.extend(clues_from_record(self, ctx, case, subject, record))
     report = create_report(self, case, subject, clues, template)
-    job = {"job_id": new_id("job"), "status": "completed", "report_id": report["id"], "plugin_run_ids": [run["id"] for run in runs], "clue_ids": [clue["id"] for clue in clues]}
-    self.security.audit(ctx, "asset_clue_report_generated", "report", report["id"], {"case_id": case_id, "clue_count": len(clues), "connector_ids": connector_ids})
+    job = {
+        "job_id": new_id("job"),
+        "status": "completed",
+        "report_id": report["id"],
+        "plugin_run_ids": [run["id"] for run in runs],
+        "clue_ids": [clue["id"] for clue in clues],
+        "connector_warnings": connector_warnings,
+    }
+    self.security.audit(
+        ctx,
+        "asset_clue_report_generated",
+        "report",
+        report["id"],
+        {"case_id": case_id, "clue_count": len(clues), "connector_ids": connector_ids, "connector_warning_count": len(connector_warnings)},
+    )
     return job
-
 
 def clues_from_record(self: LawPlatform, ctx, case: dict[str, Any], subject: dict[str, Any], record: dict[str, Any]) -> list[dict[str, Any]]:
     if record["record_type"] == "company":
@@ -260,6 +306,211 @@ def run_monitor_check(self: LawPlatform, ctx, target_id: str, payload: dict[str,
     self.security.audit(ctx, "monitor_check_run", "monitor_target", target_id, {"snapshot_id": snapshot["id"], "diff_count": len(diffs), "event_id": event["id"] if event else None})
     return {"snapshot": snapshot, "diffs": diffs, "event": event}
 
+def create_connector_alert(self: LawPlatform, ctx, case: dict[str, Any], subject: dict[str, Any], connector_id: str, exc: AppError) -> dict[str, Any]:
+    alert = {
+        "id": new_id("alert"),
+        "tenant_id": ctx.tenant_id,
+        "case_id": case["id"],
+        "subject_id": subject["id"],
+        "connector_id": connector_id,
+        "alert_type": "connector_failed",
+        "severity": "warning",
+        "status": "open",
+        "message": exc.message,
+        "error_code": exc.code,
+        "retryable": True,
+        "suggested_action": "manual_external_record",
+        "manual_entry_endpoint": f"/api/cases/{case['id']}/external-records/manual",
+        "details": exc.details,
+        "retry_job_id": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    self.store.insert("connector_alerts", alert)
+    self.security.audit(ctx, "connector_failure_alert_created", "connector_alert", alert["id"], {"case_id": case["id"], "connector_id": connector_id})
+    return alert
+
+
+def list_connector_alerts(self: LawPlatform, ctx, status: str | None = None) -> list[dict[str, Any]]:
+    user = self.security.user(ctx)
+    visible_case_ids = None
+    if user.get("role") not in {"owner", "admin", "auditor"}:
+        visible_case_ids = {case["id"] for case in self.list_cases(ctx)}
+    rows = []
+    for alert in self.store.list("connector_alerts"):
+        if alert.get("tenant_id") != ctx.tenant_id:
+            continue
+        if status and alert.get("status") != status:
+            continue
+        if visible_case_ids is not None and alert.get("case_id") not in visible_case_ids:
+            continue
+        rows.append(alert)
+    return rows
+
+
+def resolve_connector_alert(self: LawPlatform, ctx, alert_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    alert = self.store.get("connector_alerts", alert_id)
+    if not alert:
+        raise AppError("VALIDATION_ERROR", "Connector alert does not exist", 404)
+    self.security.require_case_access(ctx, alert["case_id"], "resolve_connector_alert")
+    updates = {
+        "status": "resolved",
+        "resolution": payload.get("resolution", "resolved"),
+        "resolved_by": ctx.actor_id,
+        "resolved_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    if payload.get("manual_external_record_id"):
+        updates["manual_external_record_id"] = payload["manual_external_record_id"]
+    updated = self.store.update("connector_alerts", alert_id, updates)
+    self.security.audit(ctx, "connector_alert_resolved", "connector_alert", alert_id, {"resolution": updates["resolution"]})
+    return updated
+
+
+def create_manual_external_record(self: LawPlatform, ctx, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    case = self.security.require_case_access(ctx, case_id, "create_manual_external_record")
+    subject_id = payload.get("subject_id")
+    if not subject_id:
+        relation = next((row for row in self.store.list("subject_relations") if row.get("source_record_id") == case_id), None)
+        subject_id = relation.get("source_subject_id") if relation else None
+    if not subject_id:
+        raise AppError("VALIDATION_ERROR", "subject_id is required for manual external records", 400)
+    subject = get_subject(self, ctx, subject_id)
+    record_id = new_id("ext")
+    record = {
+        "id": record_id,
+        "tenant_id": ctx.tenant_id,
+        "case_id": case_id,
+        "subject_id": subject["id"],
+        "connector_id": payload.get("connector_id", "manual_external_record"),
+        "source_name": payload.get("source_name", "Manual external record"),
+        "source_url": payload.get("source_url") or f"manual://external-records/{record_id}",
+        "record_type": payload["record_type"],
+        "record_time": payload.get("record_time") or now_iso(),
+        "fetched_at": now_iso(),
+        "normalized_payload": payload.get("normalized_payload") or {},
+        "authorization_status": "manual",
+        "raw_payload_ref": f"manual://external-records/{record_id}",
+    }
+    self.store.insert("external_records", record)
+    clues = clues_from_record(self, ctx, case, subject, record)
+    resolved_alert = None
+    if payload.get("alert_id"):
+        alert = self.store.get("connector_alerts", payload["alert_id"])
+        if not alert or alert.get("case_id") != case_id:
+            raise AppError("VALIDATION_ERROR", "Connector alert does not match this case", 400)
+        resolved_alert = self.store.update(
+            "connector_alerts",
+            alert["id"],
+            {
+                "status": "resolved",
+                "resolution": "manual_record_created",
+                "manual_external_record_id": record_id,
+                "resolved_by": ctx.actor_id,
+                "resolved_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+        )
+    self.security.audit(
+        ctx,
+        "manual_external_record_created",
+        "external_record",
+        record_id,
+        {"case_id": case_id, "record_type": record["record_type"], "alert_id": payload.get("alert_id"), "clue_count": len(clues)},
+    )
+    return {"external_record": record, "asset_clues": clues, "resolved_alert": resolved_alert}
+
+
+def schedule_monitor_jobs(self: LawPlatform, ctx) -> dict[str, Any]:
+    self.security.user(ctx)
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for target in self.store.list("monitor_targets"):
+        if target.get("tenant_id") != ctx.tenant_id or target.get("status") != "active":
+            continue
+        try:
+            self.security.require_case_access(ctx, target["case_id"], "schedule_monitor_check")
+        except AppError:
+            continue
+        if active_job_exists(self.store, ctx.tenant_id, "monitor_check", "target_id", target["id"]):
+            skipped.append({"target_id": target["id"], "reason": "active_job_exists"})
+            continue
+        created.append(
+            enqueue_job(
+                self.store,
+                ctx.tenant_id,
+                target["case_id"],
+                "monitor_check",
+                {"target_id": target["id"], "monitor_payload": {}},
+                ctx.actor_id,
+                max_attempts=3,
+            )
+        )
+    self.security.audit(ctx, "monitor_jobs_scheduled", "tenant", ctx.tenant_id, {"created": len(created), "skipped": len(skipped)})
+    return {"created": created, "skipped": skipped}
+
+
+def list_jobs(self: LawPlatform, ctx, status: str | None = None) -> list[dict[str, Any]]:
+    user = self.security.user(ctx)
+    visible_case_ids = None
+    if user.get("role") not in {"owner", "admin", "auditor"}:
+        visible_case_ids = {case["id"] for case in self.list_cases(ctx)}
+    rows = []
+    for job in self.store.list("jobs"):
+        if job.get("tenant_id") != ctx.tenant_id:
+            continue
+        if status and job.get("status") != status:
+            continue
+        if visible_case_ids is not None and job.get("case_id") not in visible_case_ids:
+            continue
+        rows.append(job)
+    return rows
+
+
+def run_due_jobs(self: LawPlatform, ctx, limit: int = 20) -> dict[str, Any]:
+    self.security.require_role(ctx, {"owner", "admin", "lawyer"})
+    processed: list[dict[str, Any]] = []
+    for queued in due_jobs(self.store, ctx.tenant_id, limit):
+        job = start_job(self.store, queued)
+        try:
+            if job["job_type"] == "monitor_check":
+                payload = job.get("payload") or {}
+                result = run_monitor_check(self, ctx, payload["target_id"], payload.get("monitor_payload") or {})
+            elif job["job_type"] == "connector_retry":
+                result = run_connector_retry(self, ctx, job)
+            else:
+                raise AppError("VALIDATION_ERROR", f"Unsupported job type: {job['job_type']}", 400)
+            processed.append(complete_job(self.store, job, result))
+        except BaseException as exc:
+            failed = fail_job(self.store, job, exc)
+            if job.get("job_type") == "connector_retry" and failed.get("status") == "failed":
+                alert_id = (job.get("payload") or {}).get("alert_id")
+                if alert_id and self.store.get("connector_alerts", alert_id):
+                    self.store.update("connector_alerts", alert_id, {"status": "retry_exhausted", "last_error": failed.get("last_error"), "updated_at": now_iso()})
+            processed.append(failed)
+    self.security.audit(ctx, "jobs_run", "tenant", ctx.tenant_id, {"processed": len(processed)})
+    return {"processed": len(processed), "jobs": processed}
+
+
+def run_connector_retry(self: LawPlatform, ctx, job: dict[str, Any]) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    case = self.security.require_case_access(ctx, job["case_id"], "connector_retry")
+    subject = get_subject(self, ctx, payload["subject_id"])
+    run, new_records = self.plugins.execute_connector(payload["connector_id"], ctx.tenant_id, case, subject, ctx.actor_id)
+    clues: list[dict[str, Any]] = []
+    for record in new_records:
+        self.store.insert("external_records", record)
+        clues.extend(clues_from_record(self, ctx, case, subject, record))
+    alert_id = payload.get("alert_id")
+    if alert_id and self.store.get("connector_alerts", alert_id):
+        self.store.update(
+            "connector_alerts",
+            alert_id,
+            {"status": "resolved", "resolution": "retry_succeeded", "retry_job_id": job["id"], "updated_at": now_iso()},
+        )
+    self.security.audit(ctx, "connector_retry_succeeded", "job", job["id"], {"connector_id": payload["connector_id"], "record_count": len(new_records)})
+    return {"plugin_run_id": run["id"], "record_ids": [record["id"] for record in new_records], "clue_ids": [clue["id"] for clue in clues], "alert_id": alert_id}
+
 def case_overview(self: LawPlatform, ctx, case_id: str) -> dict[str, Any]:
     data = _ORIGINAL_CASE_OVERVIEW(self, ctx, case_id)
     case = self.store.get("cases", case_id) or {}
@@ -267,6 +518,14 @@ def case_overview(self: LawPlatform, ctx, case_id: str) -> dict[str, Any]:
     report_reviews = [{"type": "report", "id": report["id"], "title": report["title"]} for report in self.store.list("reports") if report.get("case_id") == case_id and report.get("generation_status") == "review_required"]
     known = {(row["type"], row["id"]) for row in data.get("pending_reviews", [])}
     data["pending_reviews"].extend(row for row in report_reviews if (row["type"], row["id"]) not in known)
+    connector_alerts = [alert for alert in self.store.list("connector_alerts") if alert.get("case_id") == case_id and alert.get("status") in {"open", "retry_exhausted"}]
+    data["connector_alerts"] = connector_alerts
+    data["pending_jobs"] = [job for job in self.store.list("jobs") if job.get("case_id") == case_id and job.get("status") in {"queued", "running"}]
+    existing_reviews = {(row["type"], row["id"]) for row in data.get("pending_reviews", [])}
+    for alert in connector_alerts:
+        item = {"type": "connector_alert", "id": alert["id"], "title": f"Connector unavailable: {alert['connector_id']}"}
+        if (item["type"], item["id"]) not in existing_reviews:
+            data["pending_reviews"].append(item)
     return data
 
 

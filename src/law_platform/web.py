@@ -77,6 +77,26 @@ class MonitorCheck(BaseModel):
     title: str | None = None
 
 
+class ManualExternalRecordCreate(BaseModel):
+    subject_id: str | None = None
+    connector_id: str = "manual_external_record"
+    source_name: str = "Manual external record"
+    source_url: str | None = None
+    record_type: str
+    record_time: str | None = None
+    normalized_payload: dict[str, Any]
+    alert_id: str | None = None
+
+
+class ConnectorAlertResolve(BaseModel):
+    resolution: str = "resolved"
+    manual_external_record_id: str | None = None
+
+
+class RunDueJobsRequest(BaseModel):
+    limit: int = 20
+
+
 def model_data(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(exclude_none=True) if hasattr(model, "model_dump") else model.dict(exclude_none=True)
 
@@ -276,6 +296,31 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.post("/api/monitor-targets/{target_id}/run-check")
     def run_monitor_check(target_id: str, payload: MonitorCheck, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.run_monitor_check(context, target_id, model_data(payload)))
+
+    @app.post("/api/cases/{case_id}/external-records/manual")
+    def create_manual_external_record(case_id: str, payload: ManualExternalRecordCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_manual_external_record(context, case_id, model_data(payload)))
+
+    @app.get("/api/connector-alerts")
+    def list_connector_alerts(status: str | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.list_connector_alerts(context, status))
+
+    @app.post("/api/connector-alerts/{alert_id}/resolve")
+    def resolve_connector_alert(alert_id: str, payload: ConnectorAlertResolve, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.resolve_connector_alert(context, alert_id, model_data(payload)))
+
+    @app.get("/api/jobs")
+    def list_jobs(status: str | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.list_jobs(context, status))
+
+    @app.post("/api/jobs/schedule-monitor-checks")
+    def schedule_monitor_jobs(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.schedule_monitor_jobs(context))
+
+    @app.post("/api/jobs/run-due")
+    def run_due_jobs(payload: RunDueJobsRequest | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        limit = payload.limit if payload else 20
+        return ok(context, platform.run_due_jobs(context, limit))
     return app
 
 
