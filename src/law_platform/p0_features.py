@@ -4,7 +4,9 @@ from typing import Any
 
 from .diffing import classify_monitor_event, diff_snapshots
 from .errors import AppError
+from .data_sources import list_data_source_configs, upsert_data_source_config
 from .models import money_to_text, new_id, now_iso
+from .notifiers import dispatch_notification, get_channel_config, list_channel_configs, notification_payload, plugin_id_for_channel, upsert_channel_config, validate_callback
 from .report_export import render_report_export
 from .scoring import score_external_record, total_score
 from .services import LawPlatform
@@ -38,6 +40,11 @@ def install_p0_features() -> None:
     LawPlatform.case_overview = case_overview
     LawPlatform._create_monitor_event = create_monitor_event_with_deliveries
     LawPlatform._create_notification = create_notification
+    LawPlatform.configure_notification_channel = configure_notification_channel
+    LawPlatform.list_notification_channels = list_notification_channels
+    LawPlatform.validate_notification_callback = validate_notification_callback
+    LawPlatform.list_data_source_configs = list_platform_data_source_configs
+    LawPlatform.configure_data_source = configure_data_source
     LawPlatform._p0_features_installed = True
 
 
@@ -248,8 +255,8 @@ def export_report(self: LawPlatform, ctx, report_id: str, export_format: str) ->
     try:
         body, media_type, filename = render_report_export(report_with_clues, report_with_clues["asset_clues"], export_format)
     except ValueError:
-        raise AppError("VALIDATION_ERROR", "P0 当前支持 md 和 word 基础导出", 400)
-    export = {"id": new_id("export"), "tenant_id": ctx.tenant_id, "report_id": report_id, "actor_id": ctx.actor_id, "format": export_format, "filename": filename, "created_at": now_iso()}
+        raise AppError("VALIDATION_ERROR", "P0 当前支持 md、word 和 pdf 导出", 400)
+    export = {"id": new_id("export"), "tenant_id": ctx.tenant_id, "report_id": report_id, "actor_id": ctx.actor_id, "format": export_format, "filename": filename, "verification_status": "untested", "verification_note": "用户要求本轮测试点仅标记未测试", "created_at": now_iso()}
     self.store.insert("report_exports", export)
     self.security.audit(ctx, "report_exported", "report", report_id, {"export_id": export["id"], "format": export_format})
     return {"body": body, "media_type": media_type, "filename": filename, "export": export}
@@ -322,6 +329,7 @@ def create_connector_alert(self: LawPlatform, ctx, case: dict[str, Any], subject
         "suggested_action": "manual_external_record",
         "manual_entry_endpoint": f"/api/cases/{case['id']}/external-records/manual",
         "details": exc.details,
+        "verification_status": "untested",
         "retry_job_id": None,
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -391,6 +399,7 @@ def create_manual_external_record(self: LawPlatform, ctx, case_id: str, payload:
         "normalized_payload": payload.get("normalized_payload") or {},
         "authorization_status": "manual",
         "raw_payload_ref": f"manual://external-records/{record_id}",
+        "verification_status": "untested",
     }
     self.store.insert("external_records", record)
     clues = clues_from_record(self, ctx, case, subject, record)
@@ -556,13 +565,74 @@ def create_notification(self: LawPlatform, ctx, target: dict[str, Any], event: d
     notification_id = new_id("note")
     notification = {"id": notification_id, "tenant_id": ctx.tenant_id, "event_id": event["id"], "title": event["title"], "why_important": "该主体被列为重点监控对象，新动态可能影响执行回款路径。", "deep_link": f"/mobile/notifications/{notification_id}", "channels": target.get("notify_channels") or ["in_app"], "action_buttons": ["确认", "忽略", "转任务"], "created_at": now_iso()}
     self.store.insert("notifications", notification)
-    plugin_by_channel = {"in_app": "in_app_notifier", "feishu": "feishu_notifier", "wecom": "wecom_notifier", "email": "email_notifier"}
+    payload = notification_payload(notification, event, target)
     for channel in notification["channels"]:
-        plugin_id = plugin_by_channel.get(channel, "in_app_notifier")
+        plugin_id = plugin_id_for_channel(channel)
         contract = self.plugins.run_contract_tests(plugin_id)
-        delivery = {"id": new_id("delivery"), "tenant_id": ctx.tenant_id, "notification_id": notification_id, "channel": channel, "plugin_id": plugin_id, "delivery_status": "recorded" if contract["status"] == "passed" else "failed", "deep_link": notification["deep_link"], "created_at": now_iso()}
+        config = get_channel_config(self.store, ctx.tenant_id, channel)
+        dispatch = dispatch_notification(channel, plugin_id, contract, config, payload)
+        delivery = {
+            "id": new_id("delivery"),
+            "tenant_id": ctx.tenant_id,
+            "notification_id": notification_id,
+            "channel": channel,
+            "plugin_id": plugin_id,
+            "delivery_status": dispatch["status"],
+            "config_status": dispatch.get("config_status"),
+            "verification_status": dispatch.get("verification_status", "untested"),
+            "deep_link": notification["deep_link"],
+            "provider_status": dispatch.get("provider_status"),
+            "provider_response": dispatch.get("provider_response"),
+            "error": dispatch.get("error"),
+            "created_at": now_iso(),
+        }
         self.store.insert("notification_deliveries", delivery)
     return notification
+
+
+def configure_notification_channel(self: LawPlatform, ctx, channel: str, payload: dict[str, Any]) -> dict[str, Any]:
+    self.security.require_role(ctx, {"owner", "admin"})
+    if channel not in {"in_app", "feishu", "wecom", "email"}:
+        raise AppError("VALIDATION_ERROR", "Unsupported notification channel", 400)
+    config = upsert_channel_config(self.store, ctx.tenant_id, channel, payload, ctx.actor_id)
+    self.security.audit(ctx, "notification_channel_configured", "notification_channel", channel, {"enabled": config.get("enabled"), "verification_status": config.get("verification_status")})
+    return config
+
+
+def list_notification_channels(self: LawPlatform, ctx) -> list[dict[str, Any]]:
+    self.security.require_role(ctx, {"owner", "admin", "auditor"})
+    return list_channel_configs(self.store, ctx.tenant_id)
+
+
+def validate_notification_callback(self: LawPlatform, ctx, channel: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if channel not in {"feishu", "wecom", "email"}:
+        raise AppError("VALIDATION_ERROR", "Unsupported callback channel", 400)
+    config = get_channel_config(self.store, ctx.tenant_id, channel)
+    result = validate_callback(config, payload)
+    self.security.audit(ctx, "notification_callback_validated", "notification_channel", channel, {"status": result.get("status"), "verification_status": result.get("verification_status")})
+    return result
+
+
+def list_platform_data_source_configs(self: LawPlatform, ctx) -> list[dict[str, Any]]:
+    self.security.require_role(ctx, {"owner", "admin", "auditor"})
+    connector_ids = [plugin["plugin_id"] for plugin in self.plugins.list_plugins() if plugin.get("plugin_type") == "DataConnector"]
+    return list_data_source_configs(self.store, ctx.tenant_id, connector_ids)
+
+
+def configure_data_source(self: LawPlatform, ctx, connector_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    self.security.require_role(ctx, {"owner", "admin"})
+    plugin = self.plugins.get(connector_id)
+    if plugin.get("plugin_type") != "DataConnector":
+        raise AppError("VALIDATION_ERROR", "Only DataConnector plugins can be configured as data sources", 400)
+    config = upsert_data_source_config(self.store, ctx.tenant_id, connector_id, payload, ctx.actor_id)
+    self.security.audit(
+        ctx,
+        "data_source_configured",
+        "data_source",
+        connector_id,
+        {"enabled": config.get("enabled"), "mode": config.get("mode"), "verification_status": config.get("verification_status")},
+    )
+    return config
 
 
 def record_description(record: dict[str, Any]) -> str:

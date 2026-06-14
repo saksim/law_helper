@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .data_sources import DEMO_MODE, execute_authorized_data_source, get_data_source_config
 from .errors import AppError
 from .models import now_iso, new_id
 from .store import Store
@@ -101,8 +102,37 @@ class PluginService:
             run = self._plugin_run(tenant_id, case["id"], actor_id, plugin_id, "failed", {"contract": contract})
             self.store.insert("plugin_runs", run)
             raise AppError("CONNECTOR_UNAVAILABLE", "数据源暂时不可用，可稍后重试或人工补录", 503, contract)
-        records = self._records_for(plugin_id, subject, case)
-        run = self._plugin_run(tenant_id, case["id"], actor_id, plugin_id, "success", {"records_count": len(records), "duration_ms": 15})
+
+        plugin = self.get(plugin_id)
+        config = get_data_source_config(self.store, tenant_id, plugin_id)
+        authorization_required = bool((plugin.get("compliance") or {}).get("authorized_api_required"))
+        if plugin_id == "manual_company_connector" or config.get("mode") == DEMO_MODE:
+            records = self._records_for(plugin_id, subject, case)
+            run = self._plugin_run(
+                tenant_id,
+                case["id"],
+                actor_id,
+                plugin_id,
+                "success",
+                {"records_count": len(records), "duration_ms": 15, "data_source_mode": config.get("mode") or "manual_or_demo", "verification_status": "untested"},
+            )
+            self.store.insert("plugin_runs", run)
+            return run, records
+
+        try:
+            records, metrics = execute_authorized_data_source(
+                self.store,
+                tenant_id,
+                plugin_id,
+                case,
+                subject,
+                authorization_required=authorization_required,
+            )
+        except AppError as exc:
+            run = self._plugin_run(tenant_id, case["id"], actor_id, plugin_id, "failed", {"error": exc.details, "message": exc.message})
+            self.store.insert("plugin_runs", run)
+            raise
+        run = self._plugin_run(tenant_id, case["id"], actor_id, plugin_id, "success", metrics)
         self.store.insert("plugin_runs", run)
         return run, records
 
@@ -123,18 +153,25 @@ class PluginService:
 
     def _records_for(self, plugin_id: str, subject: dict[str, Any], case: dict[str, Any]) -> list[dict[str, Any]]:
         fetched_at = now_iso()
-        base = {"subject_id": subject["id"], "fetched_at": fetched_at, "authorization_status": "authorized", "raw_payload_ref": "store://manual-or-authorized-demo"}
+        authorization_status = "manual" if plugin_id == "manual_company_connector" else "public"
+        base = {
+            "subject_id": subject["id"],
+            "fetched_at": fetched_at,
+            "authorization_status": authorization_status,
+            "raw_payload_ref": "store://manual-or-demo-data",
+            "verification_status": "untested",
+        }
         if plugin_id == "manual_company_connector":
-            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "授权工商数据", "source_url": "https://example.local/company", "record_type": "company", "record_time": fetched_at, "normalized_payload": {"company_name": subject["name"], "aliases": [f"{subject['name']}（曾用名）"], "shareholders": [{"name": f"{subject['name']}投资平台", "ratio": "35%"}], "registered_capital": "1000万元"}}]
+            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "人工补录工商数据", "source_url": "manual://company", "record_type": "company", "record_time": fetched_at, "normalized_payload": {"company_name": subject["name"], "aliases": [f"{subject['name']}（曾用名）"], "shareholders": [{"name": f"{subject['name']}投资平台", "ratio": "35%"}], "registered_capital": "1000万元"}}]
         if plugin_id == "execution_public_connector":
-            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "执行公开信息", "source_url": "https://example.local/execution", "record_type": "execution", "record_time": fetched_at, "normalized_payload": {"case_name": case["case_name"], "amount": case.get("amount"), "status": "新增执行信息待核验"}}]
+            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "演示公开执行信息", "source_url": "https://example.local/execution", "record_type": "execution", "record_time": fetched_at, "normalized_payload": {"case_name": case["case_name"], "amount": case.get("amount"), "status": "新增执行信息待核验"}}]
         if plugin_id == "public_auction_connector":
-            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "司法拍卖公开信息", "source_url": "https://example.local/auction", "record_type": "auction", "record_time": fetched_at, "normalized_payload": {"asset_name": f"{subject['name']}相关不动产拍卖线索", "starting_price": "待核验", "status": "新增拍卖公告"}}]
+            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "演示司法拍卖公开信息", "source_url": "https://example.local/auction", "record_type": "auction", "record_time": fetched_at, "normalized_payload": {"asset_name": f"{subject['name']}相关不动产拍卖线索", "starting_price": "待核验", "status": "新增拍卖公告"}}]
         if plugin_id == "ip_rights_connector":
-            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "知识产权公开信息", "source_url": "https://example.local/ip", "record_type": "ip", "record_time": fetched_at, "normalized_payload": {"right_name": f"{subject['name']}商标/软件著作权线索", "estimated_value": "待评估", "status": "可进一步核验权属和质押状态"}}]
+            return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "演示知识产权公开信息", "source_url": "https://example.local/ip", "record_type": "ip", "record_time": fetched_at, "normalized_payload": {"right_name": f"{subject['name']}商标/软件著作权线索", "estimated_value": "待评估", "status": "可进一步核验权属和质押状态"}}]
         if plugin_id == "bid_receivable_connector":
             return [
-                {**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "招投标公开信息", "source_url": "https://example.local/bid", "record_type": "bid", "record_time": fetched_at, "normalized_payload": {"project_name": f"{subject['name']}中标项目", "contract_amount": "待核验", "status": "存在经营回款线索"}},
+                {**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "演示招投标公开信息", "source_url": "https://example.local/bid", "record_type": "bid", "record_time": fetched_at, "normalized_payload": {"project_name": f"{subject['name']}中标项目", "contract_amount": "待核验", "status": "存在经营回款线索"}},
                 {**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "应收账款人工补录", "source_url": "manual://receivable", "record_type": "receivable", "record_time": fetched_at, "authorization_status": "manual", "normalized_payload": {"debtor": "项目付款方待核验", "estimated_value": "待核验", "status": "可作为保全/协执线索"}},
             ]
         return []

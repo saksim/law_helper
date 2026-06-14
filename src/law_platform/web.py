@@ -97,6 +97,41 @@ class RunDueJobsRequest(BaseModel):
     limit: int = 20
 
 
+class NotificationChannelConfigUpdate(BaseModel):
+    enabled: bool = False
+    webhook_url: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    from_email: str | None = None
+    to_emails: list[str] | None = None
+    verification_token: str | None = None
+    signing_secret: str | None = None
+    send_timeout_seconds: int | None = None
+
+
+class NotificationCallbackValidate(BaseModel):
+    payload: dict[str, Any]
+
+
+class DataSourceConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    mode: str | None = None
+    base_url: str | None = None
+    path: str | None = None
+    method: str | None = None
+    auth_header: str | None = None
+    auth_prefix: str | None = None
+    api_key: str | None = None
+    headers: dict[str, Any] | None = None
+    query_params: dict[str, Any] | None = None
+    timeout_seconds: int | None = None
+    records_path: str | None = None
+    source_name: str | None = None
+    default_record_type: str | None = None
+
+
 def model_data(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(exclude_none=True) if hasattr(model, "model_dump") else model.dict(exclude_none=True)
 
@@ -321,6 +356,25 @@ def create_app(store: Store | None = None) -> FastAPI:
     def run_due_jobs(payload: RunDueJobsRequest | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         limit = payload.limit if payload else 20
         return ok(context, platform.run_due_jobs(context, limit))
+
+    @app.get("/api/notification-channels")
+    def list_notification_channels(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.list_notification_channels(context))
+
+    @app.put("/api/notification-channels/{channel}")
+    def configure_notification_channel(channel: str, payload: NotificationChannelConfigUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.configure_notification_channel(context, channel, model_data(payload)))
+
+    @app.post("/api/notification-channels/{channel}/callback/validate")
+    def validate_notification_callback(channel: str, payload: NotificationCallbackValidate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.validate_notification_callback(context, channel, payload.payload))
+    @app.get("/api/data-source-configs")
+    def list_data_source_configs_endpoint(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.list_data_source_configs(context))
+
+    @app.put("/api/data-source-configs/{connector_id}")
+    def configure_data_source_endpoint(connector_id: str, payload: DataSourceConfigUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.configure_data_source(context, connector_id, model_data(payload)))
     return app
 
 
