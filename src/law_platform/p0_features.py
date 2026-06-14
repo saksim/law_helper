@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .data_dictionary import model_invocation_record, normalize_file_type, normalize_source_channel
 from .diffing import classify_monitor_event, diff_snapshots
 from .errors import AppError
 from .data_sources import list_data_source_configs, upsert_data_source_config
@@ -49,6 +50,8 @@ def install_p0_features() -> None:
 
 
 def upload_file(self: LawPlatform, ctx, case_id: str, filename: str, content: bytes, file_type: str, sensitivity_level: str, source_channel: str) -> dict[str, Any]:
+    file_type = normalize_file_type(file_type)
+    source_channel = normalize_source_channel(source_channel)
     result = _ORIGINAL_UPLOAD_FILE(self, ctx, case_id, filename, content, file_type, sensitivity_level, source_channel)
     apply_case_entities(self, case_id, result.get("entities") or [])
     return result
@@ -71,7 +74,7 @@ def apply_case_entities(self: LawPlatform, case_id: str, entities: list[dict[str
         "unified_social_credit_code": "unified_social_credit_codes",
     }
     for entity in entities:
-        key = buckets.get(entity.get("entity_type"))
+        key = buckets.get(entity.get('extraction_key') or entity.get('entity_type'))
         if not key:
             continue
         value = entity.get("normalized_value")
@@ -149,8 +152,7 @@ def generate_asset_clue_report(self: LawPlatform, ctx, case_id: str, payload: di
             continue
         runs.append(run)
         for record in new_records:
-            self.store.insert("external_records", record)
-        records.extend(new_records)
+            records.append(self.store.insert('external_records', record))
     if not records:
         raise AppError(
             "CONNECTOR_UNAVAILABLE",
@@ -161,7 +163,7 @@ def generate_asset_clue_report(self: LawPlatform, ctx, case_id: str, payload: di
     clues: list[dict[str, Any]] = []
     for record in records:
         clues.extend(clues_from_record(self, ctx, case, subject, record))
-    report = create_report(self, case, subject, clues, template)
+    report = create_report(self, ctx, case, subject, clues, template)
     job = {
         "job_id": new_id("job"),
         "status": "completed",
@@ -187,8 +189,15 @@ def clues_from_record(self: LawPlatform, ctx, case: dict[str, Any], subject: dic
             related = ensure_related_subject(self, ctx, subject, shareholder.get("name", "关联主体待核验"), "shareholder", record["id"])
             clues.append(create_clue(self, ctx, case, related, record, "related_subject", f"发现关联主体：{related['name']}"))
         return clues
-    clue_type = {"auction": "auction", "execution": "execution", "ip": "ip", "bid": "bid", "receivable": "receivable"}.get(record["record_type"], "related_subject")
+    payload = record.get('normalized_payload', {})
+    record_type = record['record_type']
+    if record_type == 'bid' and payload.get('asset_subtype') == 'receivable':
+        clue_type = 'receivable'
+    else:
+        clue_type = {'auction': 'auction', 'execution': 'execution', 'ip': 'ip', 'bid': 'bid'}.get(record_type, 'related_subject')
     title = {"auction": f"{subject['name']}存在司法拍卖线索", "execution": f"{subject['name']}新增执行公开信息", "ip": f"{subject['name']}存在知识产权线索", "bid": f"{subject['name']}存在招投标经营线索", "receivable": f"{subject['name']}存在应收账款线索"}.get(record["record_type"], f"{subject['name']}存在待核验财产线索")
+    if clue_type == 'receivable':
+        title = subject['name'] + ' receivable clue'
     return [create_clue(self, ctx, case, subject, record, clue_type, title)]
 
 
@@ -213,7 +222,7 @@ def create_clue(self: LawPlatform, ctx, case: dict[str, Any], subject: dict[str,
     return clue
 
 
-def create_report(self: LawPlatform, case: dict[str, Any], subject: dict[str, Any], clues: list[dict[str, Any]], template: str) -> dict[str, Any]:
+def create_report(self: LawPlatform, ctx, case: dict[str, Any], subject: dict[str, Any], clues: list[dict[str, Any]], template: str) -> dict[str, Any]:
     report_id = new_id("report")
     sections = [
         "# 财产线索报告",
@@ -229,8 +238,26 @@ def create_report(self: LawPlatform, case: dict[str, Any], subject: dict[str, An
         "## 建议执行动作", "\n".join(f"- {clue['recommended_action']}" for clue in clues),
         "## 待人工核验事项\n- 核验主体身份、资产权属、公告状态和执行可行性。\n- 报告发布前必须完成律师复核。",
     ]
-    report = {"id": report_id, "case_id": case["id"], "report_type": "asset_clue", "title": f"{case['case_name']} - 财产线索报告", "content_md": "\n\n".join(sections), "generation_status": "review_required", "generated_by": "system", "model_invocation_id": None, "reviewed_by": None, "template": template, "created_at": now_iso(), "updated_at": now_iso()}
-    self.store.insert("reports", report)
+    created_at = now_iso()
+    invocation = {
+        'id': new_id('model'),
+        **model_invocation_record(
+            tenant_id=ctx.tenant_id,
+            actor_id=ctx.actor_id,
+            case_id=case['id'],
+            object_type='report',
+            object_id=report_id,
+            provider='private_or_local',
+            model_name=template,
+            sensitivity_level='L2',
+            input_summary='asset clue report with ' + str(len(clues)) + ' clues for ' + subject['name'],
+            output_summary='asset clue report draft',
+            created_at=created_at,
+        ),
+    }
+    report = {"id": report_id, "case_id": case["id"], "report_type": "asset_clue", "title": f"{case['case_name']} - 财产线索报告", "content_md": "\n\n".join(sections), "generation_status": "review_required", "generated_by": "system", 'model_invocation_id': invocation['id'], "reviewed_by": None, "template": template, "created_at": now_iso(), "updated_at": now_iso()}
+    self.store.insert('model_invocations', invocation)
+    self.store.insert('reports', report)
     for clue in clues:
         self.store.update("asset_clues", clue["id"], {"report_id": report_id})
         clue["report_id"] = report_id
@@ -245,7 +272,9 @@ def review_report(self: LawPlatform, ctx, report_id: str, payload: dict[str, Any
     status = payload.get("review_status", "confirmed")
     generation_status = "confirmed" if status == "confirmed" else "review_required"
     updated = self.store.update("reports", report_id, {"generation_status": generation_status, "reviewed_by": ctx.actor_id, "review_comment": payload.get("comment"), "updated_at": now_iso()})
-    review = self._review(ctx, "report", report_id, status, payload.get("comment"))
+    if report.get('model_invocation_id'):
+        self.store.update('model_invocations', report['model_invocation_id'], {'review_status': status, 'updated_at': now_iso()})
+    review = self._review(ctx, 'report', report_id, status, payload.get('comment'))
     self.security.audit(ctx, "report_reviewed", "report", report_id, {"review_id": review["id"], "status": status})
     return updated
 
@@ -257,7 +286,8 @@ def export_report(self: LawPlatform, ctx, report_id: str, export_format: str) ->
     except ValueError:
         raise AppError("VALIDATION_ERROR", "P0 当前支持 md、word 和 pdf 导出", 400)
     export = {"id": new_id("export"), "tenant_id": ctx.tenant_id, "report_id": report_id, "actor_id": ctx.actor_id, "format": export_format, "filename": filename, "verification_status": "untested", "verification_note": "用户要求本轮测试点仅标记未测试", "created_at": now_iso()}
-    self.store.insert("report_exports", export)
+    self.store.insert('report_exports', export)
+    self.store.update('reports', report_id, {'generation_status': 'exported', 'updated_at': now_iso()})
     self.security.audit(ctx, "report_exported", "report", report_id, {"export_id": export["id"], "format": export_format})
     return {"body": body, "media_type": media_type, "filename": filename, "export": export}
 
@@ -273,7 +303,7 @@ def review_clue(self: LawPlatform, ctx, clue_id: str, payload: dict[str, Any]) -
         updates["review_status"] = "edited"
     task = None
     if payload.get("next_action") == "create_task":
-        updates["review_status"] = "task_created"
+        updates['review_status'] = 'task_created'
         task = self._create_task(ctx, clue["case_id"], "asset_clue", clue_id, clue["recommended_action"] or "核验线索")
     updated = self.store.update("asset_clues", clue_id, updates)
     review = self._review(ctx, "asset_clue", clue_id, updates["review_status"], payload.get("comment"))
@@ -329,7 +359,8 @@ def create_connector_alert(self: LawPlatform, ctx, case: dict[str, Any], subject
         "suggested_action": "manual_external_record",
         "manual_entry_endpoint": f"/api/cases/{case['id']}/external-records/manual",
         "details": exc.details,
-        "verification_status": "untested",
+        'verification_status': 'untested',
+        'sensitivity_level': 'L1',
         "retry_job_id": None,
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -399,9 +430,10 @@ def create_manual_external_record(self: LawPlatform, ctx, case_id: str, payload:
         "normalized_payload": payload.get("normalized_payload") or {},
         "authorization_status": "manual",
         "raw_payload_ref": f"manual://external-records/{record_id}",
-        "verification_status": "untested",
+        'verification_status': 'untested',
+        'sensitivity_level': 'L1',
     }
-    self.store.insert("external_records", record)
+    record = self.store.insert('external_records', record)
     clues = clues_from_record(self, ctx, case, subject, record)
     resolved_alert = None
     if payload.get("alert_id"):
@@ -508,7 +540,7 @@ def run_connector_retry(self: LawPlatform, ctx, job: dict[str, Any]) -> dict[str
     run, new_records = self.plugins.execute_connector(payload["connector_id"], ctx.tenant_id, case, subject, ctx.actor_id)
     clues: list[dict[str, Any]] = []
     for record in new_records:
-        self.store.insert("external_records", record)
+        record = self.store.insert('external_records', record)
         clues.extend(clues_from_record(self, ctx, case, subject, record))
     alert_id = payload.get("alert_id")
     if alert_id and self.store.get("connector_alerts", alert_id):
@@ -645,7 +677,9 @@ def record_description(record: dict[str, Any]) -> str:
         return f"工商来源显示存在股东、曾用名或关联主体，注册资本：{payload.get('registered_capital', '待核验')}。"
     if record["record_type"] == "ip":
         return f"知识产权来源显示：{payload.get('right_name')}，状态：{payload.get('status')}。"
-    if record["record_type"] == "bid":
+    if record['record_type'] == 'bid' and payload.get('asset_subtype') == 'receivable':
+        return 'Receivable source: ' + str(payload.get('debtor')) + ' status: ' + str(payload.get('status'))
+    if record['record_type'] == 'bid':
         return f"招投标来源显示：{payload.get('project_name')}，状态：{payload.get('status')}。"
     if record["record_type"] == "receivable":
         return f"应收账款来源显示：{payload.get('debtor')}，状态：{payload.get('status')}。"

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -77,8 +77,10 @@ class SecurityService:
             "sensitivity_level": sensitivity_level,
             "input_summary": "policy check",
             "output_summary": "allowed" if allowed else "blocked",
-            "policy_blocked": not allowed,
-            "created_at": now_iso(),
+            'policy_blocked': not allowed,
+            'review_status': 'pending',
+            'created_at': now_iso(),
+            'updated_at': now_iso(),
         }
         self.store.insert("model_invocations", invocation)
         if not allowed:

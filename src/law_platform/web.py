@@ -321,6 +321,18 @@ def create_app(store: Store | None = None) -> FastAPI:
     def model_invocations(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.model_invocations(context))
 
+    @app.get('/api/data-dictionary')
+    def data_dictionary(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.data_dictionary(context))
+
+    @app.get('/api/data-dictionary/validate')
+    def data_dictionary_validate(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.data_dictionary_status(context))
+
+    @app.get('/api/lineage/{object_type}/{object_id}')
+    def data_lineage(object_type: str, object_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.data_lineage(context, object_type, object_id))
+
     @app.get("/bff/cases/{case_id}/overview")
     def case_overview(case_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.case_overview(context, case_id))

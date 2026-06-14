@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from copy import deepcopy
@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from .data_dictionary import normalize_dictionary_record, normalize_store_data, validate_dictionary_record
 from .models import seed_data
 
 
@@ -24,6 +25,7 @@ class Store:
     def _ensure_collections(self) -> None:
         for key, value in seed_data().items():
             self.data.setdefault(key, deepcopy(value))
+        self.data = normalize_store_data(self.data)
 
     def save(self) -> None:
         if not self.path:
@@ -51,25 +53,32 @@ class Store:
 
     def insert(self, collection: str, item: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            self.data.setdefault(collection, []).append(deepcopy(item))
+            normalized = normalize_dictionary_record(collection, item)
+            validate_dictionary_record(collection, normalized)
+            self.data.setdefault(collection, []).append(deepcopy(normalized))
             self.save()
-            return deepcopy(item)
+            return deepcopy(normalized)
 
     def update(self, collection: str, item_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             for index, item in enumerate(self.data.setdefault(collection, [])):
-                if item.get("id") == item_id:
-                    item.update(deepcopy(updates))
-                    self.data[collection][index] = item
+                if item.get('id') == item_id:
+                    next_item = deepcopy(item)
+                    next_item.update(deepcopy(updates))
+                    next_item = normalize_dictionary_record(collection, next_item)
+                    validate_dictionary_record(collection, next_item)
+                    self.data[collection][index] = next_item
                     self.save()
-                    return deepcopy(item)
-        raise KeyError(f"{collection}:{item_id}")
+                    return deepcopy(next_item)
+        raise KeyError(f'{collection}:{item_id}')
 
     def replace_collection(self, collection: str, rows: list[dict[str, Any]]) -> None:
         with self._lock:
-            self.data[collection] = deepcopy(rows)
+            normalized = [normalize_dictionary_record(collection, row) for row in rows]
+            for row in normalized:
+                validate_dictionary_record(collection, row)
+            self.data[collection] = deepcopy(normalized)
             self.save()
-
 
 def create_memory_store() -> Store:
     return Store(data=seed_data())

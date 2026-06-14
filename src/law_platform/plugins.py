@@ -159,7 +159,8 @@ class PluginService:
             "fetched_at": fetched_at,
             "authorization_status": authorization_status,
             "raw_payload_ref": "store://manual-or-demo-data",
-            "verification_status": "untested",
+            'verification_status': 'untested',
+            'sensitivity_level': 'L1',
         }
         if plugin_id == "manual_company_connector":
             return [{**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "人工补录工商数据", "source_url": "manual://company", "record_type": "company", "record_time": fetched_at, "normalized_payload": {"company_name": subject["name"], "aliases": [f"{subject['name']}（曾用名）"], "shareholders": [{"name": f"{subject['name']}投资平台", "ratio": "35%"}], "registered_capital": "1000万元"}}]
@@ -172,6 +173,6 @@ class PluginService:
         if plugin_id == "bid_receivable_connector":
             return [
                 {**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "演示招投标公开信息", "source_url": "https://example.local/bid", "record_type": "bid", "record_time": fetched_at, "normalized_payload": {"project_name": f"{subject['name']}中标项目", "contract_amount": "待核验", "status": "存在经营回款线索"}},
-                {**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "应收账款人工补录", "source_url": "manual://receivable", "record_type": "receivable", "record_time": fetched_at, "authorization_status": "manual", "normalized_payload": {"debtor": "项目付款方待核验", "estimated_value": "待核验", "status": "可作为保全/协执线索"}},
+                {**base, "id": new_id("ext"), "connector_id": plugin_id, "source_name": "应收账款人工补录", "source_url": "manual://receivable", "record_type": "bid", "record_time": fetched_at, "authorization_status": "manual", "normalized_payload": {"asset_subtype": "receivable", "debtor": "项目付款方待核验", "estimated_value": "待核验", "status": "可作为保全/协执线索"}},
             ]
         return []

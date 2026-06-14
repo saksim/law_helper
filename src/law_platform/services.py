@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .data_dictionary import build_lineage, data_dictionary_payload, normalize_file_type, normalize_source_channel, validate_store_against_dictionary
 from .document_pipeline import DocumentPipeline
 from .errors import AppError
 from .models import TENANT_ID, money_to_text, new_id, now_iso
@@ -65,6 +66,8 @@ class LawPlatform:
     def upload_file(self, ctx: RequestContext, case_id: str, filename: str, content: bytes, file_type: str, sensitivity_level: str, source_channel: str) -> dict[str, Any]:
         self.security.require_case_access(ctx, case_id, "upload_file")
         self.security.require_sensitive_access(ctx, sensitivity_level)
+        file_type = normalize_file_type(file_type)
+        source_channel = normalize_source_channel(source_channel)
         parsed = self.documents.parse(filename, content)
         file_id = new_id("file")
         case_file = {
@@ -226,7 +229,7 @@ class LawPlatform:
         }
         task = None
         if payload.get("next_action") == "create_task":
-            updates["review_status"] = "task_created"
+            updates['review_status'] = 'task_created'
             task = self._create_task(ctx, clue["case_id"], "asset_clue", clue_id, clue["recommended_action"] or "核验线索")
         updated = self.store.update("asset_clues", clue_id, updates)
         review = self._review(ctx, "asset_clue", clue_id, updates["review_status"], payload.get("comment"))
@@ -372,6 +375,28 @@ class LawPlatform:
         self.security.require_role(ctx, {"owner", "admin", "auditor"})
         return [row for row in self.store.list("model_invocations") if row.get("tenant_id") == ctx.tenant_id]
 
+    def data_dictionary(self, ctx: RequestContext) -> dict[str, Any]:
+        self.security.require_role(ctx, {'owner', 'admin', 'lawyer', 'reviewer', 'auditor'})
+        return data_dictionary_payload()
+
+    def data_dictionary_status(self, ctx: RequestContext) -> dict[str, Any]:
+        self.security.require_role(ctx, {'owner', 'admin', 'reviewer', 'auditor'})
+        return validate_store_against_dictionary(self.store)
+
+    def data_lineage(self, ctx: RequestContext, object_type: str, object_id: str) -> dict[str, Any]:
+        lineage = build_lineage(self.store, object_type, object_id)
+        business_object = lineage['business_object']
+        case_id = business_object.get('case_id')
+        if object_type == 'monitor_event':
+            target = self.store.get('monitor_targets', business_object['monitor_target_id'])
+            if not target:
+                raise AppError('VALIDATION_ERROR', 'Monitor target does not exist', 404)
+            case_id = target['case_id']
+        if not case_id:
+            raise AppError('VALIDATION_ERROR', 'Lineage object is not attached to a case', 400)
+        self.security.require_case_access(ctx, case_id, 'view_data_lineage')
+        return lineage
+
     def _link_subject_to_case(self, case_id: str, subject_id: str) -> None:
         relation_id = f"{case_id}:{subject_id}"
         if not self.store.get("subject_relations", relation_id):
@@ -381,7 +406,7 @@ class LawPlatform:
                     "id": relation_id,
                     "source_subject_id": subject_id,
                     "target_subject_id": subject_id,
-                    "relation_type": "case_party",
+                    'relation_type': 'related',
                     "strength": 1.0,
                     "source_record_id": case_id,
                     "created_at": now_iso(),
