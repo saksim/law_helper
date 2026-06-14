@@ -5,6 +5,9 @@
 当前迭代：
 
 - [文档层革新](current-iteration.md)
+- [律师团队 AI 平台施工蓝图](platform-construction-blueprint.md)
+- [客户体验与多端交付评估](client-experience-delivery-assessment.md)
+- [九大类施工文档包](implementation/README.md)
 
 ## 放入标准
 

@@ -1,0 +1,15 @@
+[project]
+name = "law-case-platform"
+version = "0.1.0"
+description = "P0 prototype for execution-case asset clue and monitoring workspace."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "pydantic",
+  "python-multipart",
+  "uvicorn",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

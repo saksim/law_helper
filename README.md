@@ -1,6 +1,21 @@
 # 律师团队 AI 项目文档入口
 
 本仓库的文档入口统一放在 [docs/README.md](docs/README.md)。
+## P0 可运行原型
+
+当前仓库已补入基于 [docs/working/implementation/01-PRD.md](docs/working/implementation/01-PRD.md) 的 P0 模块化单体原型，覆盖案件工作台、材料解析、主体识别、财产线索报告、监控提醒、移动 H5 轻操作、权限与审计。
+
+运行：
+
+```bash
+python -m uvicorn law_platform.web:app --app-dir src --host 127.0.0.1 --port 8000
+```
+
+测试：
+
+```bash
+python -m pytest
+```
 
 当前文档已经按生命周期重组为：
 
