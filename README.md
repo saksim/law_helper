@@ -5,6 +5,8 @@
 
 当前仓库已补入基于 [docs/working/implementation/01-PRD.md](docs/working/implementation/01-PRD.md) 的 P0 模块化单体原型，覆盖案件工作台、材料解析、主体识别、财产线索报告、监控提醒、移动 H5 轻操作、权限与审计。
 
+P1/P2 已进入施工范围，新增施工文档见 [docs/working/implementation/README.md](docs/working/implementation/README.md) 的 10-14 号文档。
+
 运行：
 
 ```bash

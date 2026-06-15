@@ -153,6 +153,44 @@ class QAAcceptanceRunCreate(BaseModel):
     release_risk_conclusion: str | None = None
 
 
+class ImplementationCheckpointCreate(BaseModel):
+    phase: str | None = None
+    sprint: str | None = None
+    milestone: str | None = None
+    dependency_statuses: dict[str, Any] | None = None
+    risk_statuses: dict[str, Any] | None = None
+    evidence_refs: dict[str, Any] | None = None
+    notes: str | None = None
+
+
+class RunbookCheckCreate(BaseModel):
+    check_key: str
+    status: str = "passed"
+    check_type: str = "pre_deployment"
+    evidence_refs: dict[str, Any] | None = None
+    notes: str | None = None
+
+
+class RunbookIncidentCreate(BaseModel):
+    incident_type: str
+    summary: str
+    severity: str = "P1"
+    status: str = "open"
+    affected_component: str | None = None
+    detection_source: str | None = None
+    diagnosis: list[str] | None = None
+    actions: list[str] | None = None
+    rollback_strategy: str | None = None
+    evidence_refs: dict[str, Any] | None = None
+
+
+class RunbookIncidentResolve(BaseModel):
+    status: str = "resolved"
+    resolution: str | None = None
+    actions: list[str] | None = None
+    evidence_refs: dict[str, Any] | None = None
+
+
 def model_data(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(exclude_none=True) if hasattr(model, "model_dump") else model.dict(exclude_none=True)
 
@@ -408,6 +446,50 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.get("/api/qa/acceptance-runs")
     def qa_acceptance_runs(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.qa_acceptance_runs(context))
+
+    @app.get("/api/implementation-plan")
+    def implementation_plan(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.implementation_plan(context))
+
+    @app.get("/api/implementation-status")
+    def implementation_status(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.implementation_status(context))
+
+    @app.post("/api/implementation-checkpoints")
+    def create_implementation_checkpoint(payload: ImplementationCheckpointCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_implementation_checkpoint(context, model_data(payload)))
+
+    @app.get("/api/implementation-checkpoints")
+    def implementation_checkpoints(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.implementation_checkpoints(context))
+
+    @app.get("/api/runbook")
+    def runbook(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.runbook(context))
+
+    @app.get("/api/runbook/status")
+    def runbook_status(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.runbook_status(context))
+
+    @app.post("/api/runbook/checks")
+    def create_runbook_check(payload: RunbookCheckCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_runbook_check(context, model_data(payload)))
+
+    @app.get("/api/runbook/checks")
+    def runbook_checks(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.runbook_checks(context))
+
+    @app.post("/api/runbook/incidents")
+    def create_runbook_incident(payload: RunbookIncidentCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_runbook_incident(context, model_data(payload)))
+
+    @app.get("/api/runbook/incidents")
+    def runbook_incidents(status: str | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.runbook_incidents(context, status))
+
+    @app.post("/api/runbook/incidents/{incident_id}/resolve")
+    def resolve_runbook_incident(incident_id: str, payload: RunbookIncidentResolve, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.resolve_runbook_incident(context, incident_id, model_data(payload)))
 
     @app.get('/api/data-dictionary')
     def data_dictionary(context: RequestContext = Depends(ctx)) -> dict[str, Any]:

@@ -5,9 +5,21 @@ from typing import Any
 from .data_dictionary import build_lineage, data_dictionary_payload, normalize_file_type, normalize_source_channel, validate_store_against_dictionary
 from .document_pipeline import DocumentPipeline
 from .errors import AppError
+from .implementation_plan import (
+    create_implementation_checkpoint,
+    implementation_plan_payload,
+    implementation_status as build_implementation_status,
+)
 from .models import TENANT_ID, money_to_text, new_id, now_iso
 from .plugins import PluginService
 from .qa_acceptance import acceptance_plan_payload, create_acceptance_run
+from .runbook import (
+    create_runbook_check,
+    create_runbook_incident,
+    resolve_runbook_incident,
+    runbook_payload,
+    runbook_status as build_runbook_status,
+)
 from .security import RequestContext, SecurityService
 from .store import Store
 
@@ -439,6 +451,98 @@ class LawPlatform:
     def qa_acceptance_runs(self, ctx: RequestContext) -> list[dict[str, Any]]:
         self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
         return [row for row in self.store.list("qa_acceptance_runs") if row.get("tenant_id") == ctx.tenant_id]
+
+    def implementation_plan(self, ctx: RequestContext) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return implementation_plan_payload()
+
+    def implementation_status(self, ctx: RequestContext) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return build_implementation_status(self.store, ctx.tenant_id)
+
+    def create_implementation_checkpoint(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer"})
+        checkpoint = create_implementation_checkpoint(self.store, ctx.tenant_id, ctx.actor_id, payload)
+        status = build_implementation_status(self.store, ctx.tenant_id)
+        self.security.audit(
+            ctx,
+            "implementation_checkpoint_created",
+            "implementation_checkpoint",
+            checkpoint["id"],
+            {
+                "phase": checkpoint.get("phase"),
+                "sprint": checkpoint.get("sprint"),
+                "milestone": checkpoint.get("milestone"),
+                "overall_status": status["overall_status"],
+            },
+        )
+        return {**checkpoint, "implementation_status": status}
+
+    def implementation_checkpoints(self, ctx: RequestContext) -> list[dict[str, Any]]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return [row for row in self.store.list("implementation_checkpoints") if row.get("tenant_id") == ctx.tenant_id]
+
+    def runbook(self, ctx: RequestContext) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return runbook_payload()
+
+    def runbook_status(self, ctx: RequestContext) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return build_runbook_status(self.store, ctx.tenant_id)
+
+    def create_runbook_check(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer"})
+        check = create_runbook_check(self.store, ctx.tenant_id, ctx.actor_id, payload)
+        status = build_runbook_status(self.store, ctx.tenant_id)
+        self.security.audit(
+            ctx,
+            "runbook_check_recorded",
+            "runbook_check",
+            check["id"],
+            {"check_type": check.get("check_type"), "check_key": check.get("check_key"), "status": check.get("status")},
+        )
+        return {**check, "runbook_status": status}
+
+    def runbook_checks(self, ctx: RequestContext) -> list[dict[str, Any]]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return [row for row in self.store.list("runbook_checks") if row.get("tenant_id") == ctx.tenant_id]
+
+    def create_runbook_incident(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer"})
+        incident = create_runbook_incident(self.store, ctx.tenant_id, ctx.actor_id, payload)
+        status = build_runbook_status(self.store, ctx.tenant_id)
+        self.security.audit(
+            ctx,
+            "runbook_incident_created",
+            "runbook_incident",
+            incident["id"],
+            {"incident_type": incident.get("incident_type"), "severity": incident.get("severity"), "status": incident.get("status")},
+        )
+        return {**incident, "runbook_status": status}
+
+    def resolve_runbook_incident(self, ctx: RequestContext, incident_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer"})
+        try:
+            incident = resolve_runbook_incident(self.store, ctx.tenant_id, incident_id, ctx.actor_id, payload)
+        except KeyError:
+            raise AppError("VALIDATION_ERROR", "Runbook incident does not exist", 404) from None
+        status = build_runbook_status(self.store, ctx.tenant_id)
+        self.security.audit(
+            ctx,
+            "runbook_incident_resolved",
+            "runbook_incident",
+            incident["id"],
+            {"incident_type": incident.get("incident_type"), "severity": incident.get("severity"), "status": incident.get("status")},
+        )
+        return {**incident, "runbook_status": status}
+
+    def runbook_incidents(self, ctx: RequestContext, status: str | None = None) -> list[dict[str, Any]]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return [
+            row
+            for row in self.store.list("runbook_incidents")
+            if row.get("tenant_id") == ctx.tenant_id and (not status or row.get("status") == status)
+        ]
 
     def data_dictionary(self, ctx: RequestContext) -> dict[str, Any]:
         self.security.require_role(ctx, {'owner', 'admin', 'lawyer', 'reviewer', 'auditor'})

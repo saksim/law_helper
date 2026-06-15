@@ -74,6 +74,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         'required': {'id', 'case_id', 'report_type', 'title', 'content_md', 'generation_status', 'generated_by', 'model_invocation_id'},
         'enums': {'report_type': 'report_type', 'generation_status': 'generation_status', 'generated_by': 'generated_by'},
     },
+    'implementation_checkpoints': {'required': {'id', 'tenant_id', 'actor_id', 'created_at'}},
+    'runbook_checks': {'required': {'id', 'tenant_id', 'actor_id', 'check_key', 'status', 'created_at'}},
+    'runbook_incidents': {'required': {'id', 'tenant_id', 'actor_id', 'incident_type', 'severity', 'status', 'summary', 'created_at'}},
     'model_invocations': {'required': {'id', 'tenant_id', 'actor_id', 'case_id', 'provider', 'sensitivity_level', 'input_summary', 'output_summary', 'review_status', 'created_at'}, 'enums': {'sensitivity_level': 'sensitivity_level', 'review_status': 'review_status'}},
 }
 

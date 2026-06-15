@@ -71,6 +71,9 @@ def seed_data() -> dict[str, list[dict[str, Any]]]:
         "review_records": [],
         "feedback_records": [],
         "qa_acceptance_runs": [],
+        "implementation_checkpoints": [],
+        "runbook_checks": [],
+        "runbook_incidents": [],
         "model_invocations": [],
         "audit_logs": [],
     }
