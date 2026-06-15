@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .data_dictionary import model_invocation_record, normalize_file_type, normalize_source_channel
+from .data_dictionary import normalize_file_type, normalize_source_channel
 from .diffing import classify_monitor_event, diff_snapshots
 from .errors import AppError
 from .data_sources import list_data_source_configs, upsert_data_source_config
@@ -54,6 +54,29 @@ def upload_file(self: LawPlatform, ctx, case_id: str, filename: str, content: by
     source_channel = normalize_source_channel(source_channel)
     result = _ORIGINAL_UPLOAD_FILE(self, ctx, case_id, filename, content, file_type, sensitivity_level, source_channel)
     apply_case_entities(self, case_id, result.get("entities") or [])
+    self.plugins.record_plugin_run(
+        "basic_document_parser",
+        ctx.tenant_id,
+        case_id,
+        ctx.actor_id,
+        "success" if result.get("parse_status") != "failed" else "failed",
+        {"filename": filename, "file_type": file_type, "source_channel": source_channel},
+        outputs=[{"file_id": result["id"], "parse_status": result.get("parse_status"), "quality_summary": result.get("quality_summary", {})}],
+        metrics={"blocks_count": len(result.get("blocks") or []), "entities_count": len(result.get("entities") or [])},
+        sensitivity_level=sensitivity_level,
+    )
+    self.plugins.record_plugin_run(
+        "case_element_extractor",
+        ctx.tenant_id,
+        case_id,
+        ctx.actor_id,
+        "success",
+        {"file_id": result["id"]},
+        outputs=result.get("entities") or [],
+        source_refs=[{"source_name": filename, "source_url": result.get("storage_path"), "source_time": result.get("created_at"), "fetched_at": result.get("created_at")}],
+        metrics={"entities_count": len(result.get("entities") or [])},
+        sensitivity_level=sensitivity_level,
+    )
     return result
 
 
@@ -133,7 +156,7 @@ def generate_asset_clue_report(self: LawPlatform, ctx, case_id: str, payload: di
         try:
             run, new_records = self.plugins.execute_connector(connector_id, ctx.tenant_id, case, subject, ctx.actor_id)
         except AppError as exc:
-            if exc.code != "CONNECTOR_UNAVAILABLE":
+            if exc.code not in {"CONNECTOR_UNAVAILABLE", "RATE_LIMITED"}:
                 raise
             alert = create_connector_alert(self, ctx, case, subject, connector_id, exc)
             retry_job = enqueue_job(
@@ -219,6 +242,17 @@ def create_clue(self: LawPlatform, ctx, case: dict[str, Any], subject: dict[str,
     clue = {"id": new_id("clue"), "case_id": case["id"], "subject_id": subject["id"], "report_id": None, "clue_type": clue_type, "title": title, "description": record_description(record), "estimated_value": estimated_value(case, record), "actionability_score": score, "score_breakdown": breakdown, "confidence": breakdown["credibility"] / 100, "source_refs": [source_ref], "review_status": "pending", "recommended_action": recommended_action(clue_type), "verification_items": verification_items(clue_type), "why_important": why_important(clue_type), "created_at": now_iso(), "updated_at": now_iso()}
     self.store.insert("asset_clues", clue)
     self.store.insert("asset_clue_scores", {"id": new_id("score"), "clue_id": clue["id"], "case_id": case["id"], "score_breakdown": breakdown, "total_score": score, "created_at": now_iso()})
+    self.plugins.record_plugin_run(
+        "asset_clue_scorer_v1",
+        ctx.tenant_id,
+        case["id"],
+        ctx.actor_id,
+        "success",
+        {"external_record_id": record["id"], "clue_type": clue_type},
+        outputs=[{"clue_id": clue["id"], "score_breakdown": breakdown, "total_score": score}],
+        source_refs=[source_ref],
+        metrics={"total_score": score},
+    )
     return clue
 
 
@@ -238,29 +272,61 @@ def create_report(self: LawPlatform, ctx, case: dict[str, Any], subject: dict[st
         "## 建议执行动作", "\n".join(f"- {clue['recommended_action']}" for clue in clues),
         "## 待人工核验事项\n- 核验主体身份、资产权属、公告状态和执行可行性。\n- 报告发布前必须完成律师复核。",
     ]
-    created_at = now_iso()
-    invocation = {
-        'id': new_id('model'),
-        **model_invocation_record(
-            tenant_id=ctx.tenant_id,
-            actor_id=ctx.actor_id,
-            case_id=case['id'],
-            object_type='report',
-            object_id=report_id,
-            provider='private_or_local',
-            model_name=template,
-            sensitivity_level='L2',
-            input_summary='asset clue report with ' + str(len(clues)) + ' clues for ' + subject['name'],
-            output_summary='asset clue report draft',
-            created_at=created_at,
-        ),
-    }
-    report = {"id": report_id, "case_id": case["id"], "report_type": "asset_clue", "title": f"{case['case_name']} - 财产线索报告", "content_md": "\n\n".join(sections), "generation_status": "review_required", "generated_by": "system", 'model_invocation_id': invocation['id'], "reviewed_by": None, "template": template, "created_at": now_iso(), "updated_at": now_iso()}
-    self.store.insert('model_invocations', invocation)
+    invocation = self.security.check_model_policy(ctx, case["id"], "L2", provider_external=False)
+    invocation = self.store.update(
+        "model_invocations",
+        invocation["id"],
+        {
+            "object_type": "report",
+            "object_id": report_id,
+            "model_name": template,
+            "input_summary": "asset clue report with " + str(len(clues)) + " clues for " + subject["name"],
+            "output_summary": "asset clue report draft",
+            "sensitive_output_check": "redacted_before_persistence",
+            "updated_at": now_iso(),
+        },
+    )
+    report = {"id": report_id, "case_id": case["id"], "report_type": "asset_clue", "title": f"{case['case_name']} - 财产线索报告", "content_md": self.security.redact_record("\n\n".join(sections)), "generation_status": "review_required", "generated_by": "system", 'model_invocation_id': invocation['id'], "reviewed_by": None, "template": template, "created_at": now_iso(), "updated_at": now_iso()}
     self.store.insert('reports', report)
     for clue in clues:
         self.store.update("asset_clues", clue["id"], {"report_id": report_id})
         clue["report_id"] = report_id
+    source_refs = [ref for clue in clues for ref in clue.get("source_refs", [])]
+    self.plugins.record_plugin_run(
+        template,
+        ctx.tenant_id,
+        case["id"],
+        ctx.actor_id,
+        "success",
+        {"report_id": report_id, "clue_count": len(clues)},
+        outputs=[{"report_id": report_id, "generation_status": report["generation_status"], "required_review": True}],
+        source_refs=source_refs,
+        metrics={"sections_count": len(sections), "clue_count": len(clues), "content_length": len(report["content_md"])},
+        sensitivity_level="L2",
+    )
+    self.plugins.record_plugin_run(
+        "private_model_provider",
+        ctx.tenant_id,
+        case["id"],
+        ctx.actor_id,
+        "success",
+        {"model_invocation_id": invocation["id"], "object_type": "report", "object_id": report_id},
+        outputs=[{"model_invocation_id": invocation["id"], "output_summary": invocation["output_summary"]}],
+        metrics={"clue_count": len(clues)},
+        sensitivity_level="L2",
+        allow_external_call=False,
+    )
+    self.plugins.record_plugin_run(
+        "high_risk_review_policy",
+        ctx.tenant_id,
+        case["id"],
+        ctx.actor_id,
+        "success",
+        {"object_type": "report", "object_id": report_id, "risk_level": case.get("risk_level")},
+        outputs=[{"object_type": "report", "object_id": report_id, "review_required": True}],
+        metrics={"review_required": 1},
+        sensitivity_level="L2",
+    )
     return report
 
 
@@ -281,14 +347,34 @@ def review_report(self: LawPlatform, ctx, report_id: str, payload: dict[str, Any
 
 def export_report(self: LawPlatform, ctx, report_id: str, export_format: str) -> dict[str, Any]:
     report_with_clues = _ORIGINAL_GET_REPORT(self, ctx, report_id)
+    if report_with_clues.get("generation_status") not in {"confirmed", "exported"}:
+        self.security.audit(ctx, "report_export_blocked_review_required", "report", report_id, {"format": export_format})
+        raise AppError("REVIEW_REQUIRED", "报告导出前必须完成律师复核", 409, {"report_id": report_id, "review_status": report_with_clues.get("generation_status")})
+    export_id = new_id("export")
+    created_at = now_iso()
+    watermark = self.security.export_watermark(ctx, report_id, export_id, export_format, created_at)
+    safe_report = self.security.redact_record(report_with_clues)
+    safe_clues = self.security.redact_record(report_with_clues["asset_clues"])
     try:
-        body, media_type, filename = render_report_export(report_with_clues, report_with_clues["asset_clues"], export_format)
+        body, media_type, filename = render_report_export(safe_report, safe_clues, export_format, watermark)
     except ValueError:
         raise AppError("VALIDATION_ERROR", "P0 当前支持 md、word 和 pdf 导出", 400)
-    export = {"id": new_id("export"), "tenant_id": ctx.tenant_id, "report_id": report_id, "actor_id": ctx.actor_id, "format": export_format, "filename": filename, "verification_status": "untested", "verification_note": "用户要求本轮测试点仅标记未测试", "created_at": now_iso()}
+    export = {
+        "id": export_id,
+        "tenant_id": ctx.tenant_id,
+        "report_id": report_id,
+        "actor_id": ctx.actor_id,
+        "format": export_format,
+        "filename": filename,
+        "watermark": watermark,
+        "review_status_at_export": report_with_clues.get("generation_status"),
+        "verification_status": "untested",
+        "verification_note": "用户要求本轮测试点仅标记未测试",
+        "created_at": created_at,
+    }
     self.store.insert('report_exports', export)
     self.store.update('reports', report_id, {'generation_status': 'exported', 'updated_at': now_iso()})
-    self.security.audit(ctx, "report_exported", "report", report_id, {"export_id": export["id"], "format": export_format})
+    self.security.audit(ctx, "report_exported", "report", report_id, {"export_id": export["id"], "format": export_format, "watermark": watermark})
     return {"body": body, "media_type": media_type, "filename": filename, "export": export}
 
 
@@ -603,12 +689,27 @@ def create_notification(self: LawPlatform, ctx, target: dict[str, Any], event: d
         contract = self.plugins.run_contract_tests(plugin_id)
         config = get_channel_config(self.store, ctx.tenant_id, channel)
         dispatch = dispatch_notification(channel, plugin_id, contract, config, payload)
+        run_status = "success" if dispatch["status"] in {"recorded", "sent"} else "failed"
+        plugin_run = self.plugins.record_plugin_run(
+            plugin_id,
+            ctx.tenant_id,
+            target["case_id"],
+            ctx.actor_id,
+            run_status,
+            {"notification_id": notification_id, "channel": channel, "event_id": event["id"]},
+            outputs=[dispatch],
+            source_refs=payload.get("source_refs") or [],
+            metrics={"provider": channel},
+            error={"code": dispatch.get("config_status") or dispatch["status"], "message": str(dispatch.get("error") or dispatch["status"])} if run_status == "failed" else None,
+            retryable=run_status == "failed",
+        )
         delivery = {
             "id": new_id("delivery"),
             "tenant_id": ctx.tenant_id,
             "notification_id": notification_id,
             "channel": channel,
             "plugin_id": plugin_id,
+            "plugin_run_id": plugin_run["id"],
             "delivery_status": dispatch["status"],
             "config_status": dispatch.get("config_status"),
             "verification_status": dispatch.get("verification_status", "untested"),

@@ -8,6 +8,7 @@ from email.message import EmailMessage
 from typing import Any
 
 from .models import new_id, now_iso
+from .security import redact_sensitive_data, redact_sensitive_text
 from .store import Store
 
 PLUGIN_BY_CHANNEL = {
@@ -71,7 +72,7 @@ def mask_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def notification_payload(notification: dict[str, Any], event: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "title": notification.get("title"),
         "event_id": event.get("id"),
         "event_type": event.get("event_type"),
@@ -85,6 +86,7 @@ def notification_payload(notification: dict[str, Any], event: dict[str, Any], ta
         "case_id": target.get("case_id"),
         "monitor_target_id": target.get("id"),
     }
+    return redact_sensitive_data(payload)
 
 
 def dispatch_notification(channel: str, plugin_id: str, contract: dict[str, Any], config: dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any]:
@@ -150,7 +152,7 @@ def wecom_body(payload: dict[str, Any]) -> dict[str, Any]:
 
 def format_text(payload: dict[str, Any]) -> str:
     sources = "；".join(source.get("source_name", "") for source in payload.get("source_refs") or [] if source.get("source_name"))
-    return "\n".join(
+    text = "\n".join(
         part
         for part in [
             payload.get("title") or "案件提醒",
@@ -162,6 +164,7 @@ def format_text(payload: dict[str, Any]) -> str:
         ]
         if part
     )
+    return redact_sensitive_text(text)
 
 
 def validate_callback(config: dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any]:

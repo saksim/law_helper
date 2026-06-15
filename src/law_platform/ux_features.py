@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .errors import AppError
+from .security import MOBILE_SENSITIVE_PLACEHOLDER, mobile_should_hide_raw_material
 from .models import now_iso
 from .services import LawPlatform
 from .ux_presenters import (
@@ -55,6 +56,27 @@ def _file_blocks(self: LawPlatform, file_id: str) -> list[dict[str, Any]]:
 
 def _file_entities(self: LawPlatform, file_id: str) -> list[dict[str, Any]]:
     return [row for row in self.store.list("extracted_entities") if row.get("object_id") == file_id]
+
+
+def _present_file_for_ctx(self: LawPlatform, ctx, file: dict[str, Any]) -> dict[str, Any]:
+    sensitivity_level = file.get("sensitivity_level", "L4")
+    if not self.security.can_access_sensitivity(ctx, sensitivity_level):
+        self.security.audit(ctx, "sensitive_material_hidden", "case_file", file["id"], {"case_id": file.get("case_id"), "sensitivity_level": sensitivity_level})
+        restricted = present_file(file, [], [])
+        restricted.update(
+            {
+                "status_label": "敏感材料需要额外权限",
+                "access_restricted": True,
+                "parsed_blocks": [],
+                "review_items": [],
+                "low_confidence_count": 0,
+            }
+        )
+        return restricted
+    blocks = _file_blocks(self, file["id"])
+    if mobile_should_hide_raw_material(ctx, sensitivity_level):
+        blocks = [{**block, "text": MOBILE_SENSITIVE_PLACEHOLDER, "markdown": MOBILE_SENSITIVE_PLACEHOLDER, "mobile_raw_hidden": True} for block in blocks]
+    return present_file(file, blocks, _file_entities(self, file["id"]))
 
 
 def _case_subject_ids(self: LawPlatform, case_id: str, clues: list[dict[str, Any]] | None = None) -> list[str]:
@@ -216,7 +238,7 @@ def case_workspace(self: LawPlatform, ctx, case_id: str) -> dict[str, Any]:
     clues_raw = [row for row in self.store.list("asset_clues") if row.get("case_id") == case_id]
     clues = [present_clue(row, subjects.get(row.get("subject_id"))) for row in clues_raw]
     files = _case_files(self, case_id)
-    presented_files = [present_file(file, _file_blocks(self, file["id"]), _file_entities(self, file["id"])) for file in files]
+    presented_files = [_present_file_for_ctx(self, ctx, file) for file in files]
     file_ids = {file["id"] for file in files}
     deadlines = _deadline_items(self, {case_id})
     reports = [_present_report(row) for row in self.store.list("reports") if row.get("case_id") == case_id]

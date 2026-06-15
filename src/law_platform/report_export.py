@@ -16,25 +16,28 @@ LEADING = 16
 MAX_TEXT_WIDTH = 62
 
 
-def render_report_export(report: dict[str, Any], clues: list[dict[str, Any]], export_format: str) -> tuple[ExportBody, str, str]:
+def render_report_export(report: dict[str, Any], clues: list[dict[str, Any]], export_format: str, watermark: str | None = None) -> tuple[ExportBody, str, str]:
     title = report.get("title", "asset-clue-report")
+    content_md = report.get("content_md", "")
+    if watermark:
+        content_md = f"{content_md}\n\n---\n\n{watermark}"
     if export_format == "md":
-        body = report.get("content_md", "")
-        return body, "text/markdown; charset=utf-8", f"{title}.md"
+        return content_md, "text/markdown; charset=utf-8", f"{title}.md"
     if export_format == "word":
         clue_rows = "".join(
             f"<li>{escape(clue.get('title', ''))} - {clue.get('actionability_score', '')} 分 - {escape((clue.get('source_refs') or [{}])[0].get('source_name', ''))}</li>"
             for clue in clues
         )
-        html = f"""<!doctype html><html><head><meta charset='utf-8'><title>{escape(title)}</title></head><body><h1>{escape(title)}</h1><pre>{escape(report.get('content_md', ''))}</pre><h2>线索清单</h2><ul>{clue_rows}</ul></body></html>"""
+        watermark_html = f"<p><strong>导出水印</strong><br>{escape(watermark)}</p>" if watermark else ""
+        html = f"""<!doctype html><html><head><meta charset='utf-8'><title>{escape(title)}</title></head><body><h1>{escape(title)}</h1><pre>{escape(content_md)}</pre><h2>线索清单</h2><ul>{clue_rows}</ul>{watermark_html}</body></html>"""
         return html, "application/msword; charset=utf-8", f"{title}.doc"
     if export_format == "pdf":
-        body = render_pdf_report(title, report.get("content_md", ""), clues)
+        body = render_pdf_report(title, content_md, clues, watermark)
         return body, "application/pdf", f"{title}.pdf"
     raise ValueError("unsupported_export_format")
 
 
-def render_pdf_report(title: str, content_md: str, clues: list[dict[str, Any]]) -> bytes:
+def render_pdf_report(title: str, content_md: str, clues: list[dict[str, Any]], watermark: str | None = None) -> bytes:
     lines = [title, ""]
     lines.extend(markdown_to_pdf_lines(content_md))
     if clues:

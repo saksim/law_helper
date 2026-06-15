@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .security import redact_sensitive_text
+
 
 MOJIBAKE_MARKERS = ("�", "锛", "鏂", "鎵", "绾", "寰", "鐩", "妗", "杞", "浠", "涓", "鍏", "璧")
 
@@ -17,7 +19,7 @@ def clean_text(value: Any, fallback: str = "") -> str:
     text = str(value).strip()
     if not text or has_broken_text(text):
         return fallback
-    return text
+    return redact_sensitive_text(text)
 
 
 def risk_label(value: Any) -> str:

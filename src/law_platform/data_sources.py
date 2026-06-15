@@ -219,6 +219,7 @@ def _normalize_records(config: dict[str, Any], connector_id: str, subject: dict[
                 "raw_payload_ref": f"{raw_ref}/records/{index}",
                 "authorization_status": "authorized",
                 "verification_status": "untested",
+                "sensitivity_level": "L1",
             }
         )
     return records

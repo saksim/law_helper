@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 from .errors import AppError
-from .models import TENANT_ID, now_iso
+from .models import new_id, now_iso
 from .p0_features import install_p0_features
 from .security import RequestContext
 from .services import LawPlatform
@@ -45,6 +46,14 @@ class SubjectResolve(BaseModel):
     name: str
     unified_social_credit_code: str | None = None
     case_id: str | None = None
+
+
+
+class CaseSubjectAttach(BaseModel):
+    subject_id: str | None = None
+    name: str | None = None
+    unified_social_credit_code: str | None = None
+    aliases: list[str] | None = None
 
 
 class ReportCreate(BaseModel):
@@ -138,6 +147,31 @@ def model_data(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(exclude_none=True) if hasattr(model, "model_dump") else model.dict(exclude_none=True)
 
 
+
+CLIENT_TYPES = {'web', 'mobile_h5', 'mini_program', 'bot', 'admin'}
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def paginate_rows(rows: list[Any], page: int, page_size: int) -> tuple[list[Any], dict[str, Any]]:
+    total = len(rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return rows[start:end], {
+        'page': page,
+        'page_size': page_size,
+        'total': total,
+        'has_next': end < total,
+        'test_status': 'untested',
+    }
+
+
 def create_app(store: Store | None = None) -> FastAPI:
     store = store or Store(Path(".runtime/law_platform_store.json"))
     install_p0_features()
@@ -147,28 +181,54 @@ def create_app(store: Store | None = None) -> FastAPI:
     app.state.platform = platform
 
     def ctx(request: Request) -> RequestContext:
-        auth = request.headers.get("Authorization", "")
-        actor_id = "user_owner"
-        if auth.lower().startswith("bearer "):
-            actor_id = auth.split(" ", 1)[1].strip() or actor_id
+        auth = request.headers.get('Authorization', '')
+        if not auth.lower().startswith('bearer '):
+            raise AppError('PERMISSION_DENIED', 'Authorization Bearer token is required', 401, {'test_status': 'untested'})
+        actor_id = auth.split(' ', 1)[1].strip()
+        if not actor_id:
+            raise AppError('PERMISSION_DENIED', 'Authorization Bearer token is required', 401, {'test_status': 'untested'})
+        tenant_id = request.headers.get('X-Tenant-Id')
+        if not tenant_id:
+            raise AppError('VALIDATION_ERROR', 'X-Tenant-Id is required', 400, {'test_status': 'untested'})
+        client_type = request.headers.get('X-Client-Type', 'web')
+        if client_type not in CLIENT_TYPES:
+            raise AppError('VALIDATION_ERROR', 'Unsupported X-Client-Type', 400, {'allowed': sorted(CLIENT_TYPES), 'test_status': 'untested'})
+        request_id = request.headers.get('X-Request-Id') or new_id('req')
+        page = _bounded_int(request.query_params.get('page'), 1, 1, 10000)
+        page_size = _bounded_int(request.query_params.get('page_size'), 50, 1, 100)
         return RequestContext(
-            tenant_id=request.headers.get("X-Tenant-Id", TENANT_ID),
+            tenant_id=tenant_id,
             actor_id=actor_id,
-            request_id=request.headers.get("X-Request-Id", "req_demo"),
-            client_type=request.headers.get("X-Client-Type", "web"),
+            request_id=request_id,
+            client_type=client_type,
             ip=request.client.host if request.client else None,
-            user_agent=request.headers.get("User-Agent"),
+            user_agent=request.headers.get('User-Agent'),
+            page=page,
+            page_size=page_size,
         )
 
-    def ok(context: RequestContext, data: Any) -> dict[str, Any]:
-        return {"request_id": context.request_id, "data": data, "meta": {"server_time": now_iso()}}
+    def ok(context: RequestContext, data: Any, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        response_meta = {'server_time': now_iso(), **(meta or {})}
+        if isinstance(data, list):
+            data, pagination = paginate_rows(data, context.page, context.page_size)
+            response_meta['pagination'] = pagination
+        return {'request_id': context.request_id, 'data': data, 'meta': response_meta}
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
-        request_id = request.headers.get("X-Request-Id", "req_demo")
+        request_id = request.headers.get('X-Request-Id') or new_id('req')
         return JSONResponse(
             status_code=exc.status_code,
             content={"request_id": request_id, "error": {"code": exc.code, "message": exc.message, "details": exc.details}},
+        )
+
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        request_id = request.headers.get('X-Request-Id') or new_id('req')
+        return JSONResponse(
+            status_code=400,
+            content={'request_id': request_id, 'error': {'code': 'VALIDATION_ERROR', 'message': 'Request validation failed', 'details': {'errors': exc.errors(), 'test_status': 'untested'}}},
         )
 
     @app.get("/", response_class=HTMLResponse)
@@ -228,7 +288,9 @@ def create_app(store: Store | None = None) -> FastAPI:
         if not file:
             raise AppError("VALIDATION_ERROR", "文件不存在", 404)
         platform.security.require_case_access(context, file["case_id"])
-        return file.get("markdown", "")
+        platform.security.require_sensitive_access(context, file.get("sensitivity_level", "L4"))
+        platform.security.audit(context, "material_markdown_viewed", "case_file", file_id, {"case_id": file["case_id"], "sensitivity_level": file.get("sensitivity_level"), "client_type": context.client_type})
+        return platform.security.protect_material_text(context, file.get("markdown", ""), file.get("sensitivity_level"))
 
     @app.post("/api/document-blocks/{block_id}/review")
     def review_block(block_id: str, payload: BlockReview, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
@@ -242,6 +304,10 @@ def create_app(store: Store | None = None) -> FastAPI:
     def get_subject(subject_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.get_subject(context, subject_id))
 
+
+    @app.post('/api/cases/{case_id}/subjects')
+    def attach_subject(case_id: str, payload: CaseSubjectAttach, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.attach_subject_to_case(context, case_id, model_data(payload)))
     @app.post("/api/cases/{case_id}/asset-clue-reports")
     def create_report(case_id: str, payload: ReportCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.generate_asset_clue_report(context, case_id, model_data(payload)))
@@ -407,6 +473,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.post("/api/notification-channels/{channel}/callback/validate")
     def validate_notification_callback(channel: str, payload: NotificationCallbackValidate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.validate_notification_callback(context, channel, payload.payload))
+
     @app.get("/api/data-source-configs")
     def list_data_source_configs_endpoint(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.list_data_source_configs(context))

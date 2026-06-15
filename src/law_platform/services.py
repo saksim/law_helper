@@ -106,13 +106,16 @@ class LawPlatform:
         if not file:
             raise AppError("VALIDATION_ERROR", "文件不存在", 404)
         self.security.require_case_access(ctx, file["case_id"])
+        self.security.require_sensitive_access(ctx, file.get("sensitivity_level", "L4"))
         blocks = [block for block in self.store.list("document_blocks") if block.get("file_id") == file_id]
+        protected_blocks = [self.security.protect_material_record(ctx, block, file.get("sensitivity_level")) for block in blocks]
+        self.security.audit(ctx, "material_viewed", "case_file", file_id, {"case_id": file["case_id"], "sensitivity_level": file.get("sensitivity_level"), "client_type": ctx.client_type})
         return {
             "file_id": file_id,
             "parse_status": file["parse_status"],
             "markdown_url": f"/api/files/{file_id}/markdown",
             "quality_summary": file.get("quality_summary", {}),
-            "blocks": blocks,
+            "blocks": protected_blocks,
         }
 
     def review_block(self, ctx: RequestContext, block_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +184,32 @@ class LawPlatform:
             raise AppError("VALIDATION_ERROR", "主体不存在", 404)
         return subject
 
+
+    def attach_subject_to_case(self, ctx: RequestContext, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.security.require_case_access(ctx, case_id, 'attach_subject')
+        subject_id = payload.get('subject_id')
+        if subject_id:
+            subject = self.get_subject(ctx, subject_id)
+            self._link_subject_to_case(case_id, subject['id'])
+            self.security.audit(ctx, 'subject_attached_to_case', 'subject', subject['id'], {'case_id': case_id})
+            return {
+                'candidates': [
+                    {
+                        'subject_id': subject['id'],
+                        'name': subject['name'],
+                        'unified_social_credit_code': subject.get('unified_social_credit_code'),
+                        'confidence': subject.get('confidence'),
+                        'source_refs': [],
+                        'resolve_status': subject.get('resolve_status'),
+                    }
+                ],
+                'requires_confirmation': subject.get('resolve_status') != 'confirmed',
+                'test_status': 'untested',
+            }
+        if not payload.get('name'):
+            raise AppError('VALIDATION_ERROR', 'subject_id or name is required', 400, {'test_status': 'untested'})
+        return self.resolve_subject(ctx, {**payload, 'case_id': case_id})
+
     def generate_asset_clue_report(self, ctx: RequestContext, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         case = self.security.require_case_access(ctx, case_id, "generate_asset_clue_report")
         subject = self.get_subject(ctx, payload["subject_id"])
@@ -215,7 +244,8 @@ class LawPlatform:
             raise AppError("VALIDATION_ERROR", "报告不存在", 404)
         self.security.require_case_access(ctx, report["case_id"])
         clues = [clue for clue in self.store.list("asset_clues") if clue.get("report_id") == report_id]
-        return {**report, "asset_clues": clues}
+        self.security.audit(ctx, "report_viewed", "report", report_id, {"case_id": report["case_id"], "client_type": ctx.client_type})
+        return self.security.redact_record({**report, "asset_clues": clues})
 
     def review_clue(self, ctx: RequestContext, clue_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         clue = self.store.get("asset_clues", clue_id)
@@ -257,16 +287,26 @@ class LawPlatform:
         return {**target, "initial_event_id": event["id"]}
 
     def list_monitor_targets(self, ctx: RequestContext) -> list[dict[str, Any]]:
-        self.security.user(ctx)
-        return [target for target in self.store.list("monitor_targets") if target.get("tenant_id") == ctx.tenant_id]
+        user = self.security.user(ctx)
+        visible_case_ids = None
+        if user.get("role") not in {"owner", "admin", "auditor"}:
+            visible_case_ids = {case["id"] for case in self.list_cases(ctx)}
+        return [
+            target
+            for target in self.store.list("monitor_targets")
+            if target.get("tenant_id") == ctx.tenant_id and (visible_case_ids is None or target.get("case_id") in visible_case_ids)
+        ]
 
     def list_monitor_events(self, ctx: RequestContext) -> list[dict[str, Any]]:
-        self.security.user(ctx)
+        user = self.security.user(ctx)
+        visible_case_ids = None
+        if user.get("role") not in {"owner", "admin", "auditor"}:
+            visible_case_ids = {case["id"] for case in self.list_cases(ctx)}
         events = []
         for event in self.store.list("monitor_events"):
             target = self.store.get("monitor_targets", event["monitor_target_id"])
-            if target and target.get("tenant_id") == ctx.tenant_id:
-                events.append(event)
+            if target and target.get("tenant_id") == ctx.tenant_id and (visible_case_ids is None or target.get("case_id") in visible_case_ids):
+                events.append(self.security.redact_record(event))
         return events
 
     def handle_monitor_event(self, ctx: RequestContext, event_id: str, action: str) -> dict[str, Any]:
