@@ -97,6 +97,8 @@ class ManualExternalRecordCreate(BaseModel):
     record_time: str | None = None
     normalized_payload: dict[str, Any]
     alert_id: str | None = None
+    attachments: list[dict[str, Any]] | None = None
+    reviewed_by: str | None = None
 
 
 class ConnectorAlertResolve(BaseModel):
@@ -141,6 +143,134 @@ class DataSourceConfigUpdate(BaseModel):
     records_path: str | None = None
     source_name: str | None = None
     default_record_type: str | None = None
+
+
+class SystemAlertResolve(BaseModel):
+    resolution: str = "resolved"
+
+
+class FeedbackSampleCreate(BaseModel):
+    object_type: str
+    object_id: str
+    human_label: str
+    input_summary: str | None = None
+    output_summary: str | None = None
+    source_refs: list[dict[str, Any]] | None = None
+    comment: str | None = None
+    sensitivity_level: str = "L2"
+
+
+class BackupCheckCreate(BaseModel):
+    status: str = "passed"
+    backup_scope: str = "database_and_files"
+    restore_drill_status: str = "passed"
+    evidence_refs: dict[str, Any] | None = None
+    notes: str | None = None
+
+
+class ConfigRotateRequest(BaseModel):
+    config_type: str = "data_source"
+
+
+class DataSourceCatalogUpdate(BaseModel):
+    source_name: str | None = None
+    authorization_status: str = "unknown"
+    status: str = "active"
+    billing_model: str = "unknown"
+    config_id: str | None = None
+
+
+class DataSourceHealthCheckCreate(BaseModel):
+    status: str | None = None
+    latency_ms: int | None = None
+    error_rate: float | None = None
+    message: str | None = None
+
+
+class FieldMappingUpdate(BaseModel):
+    mapping_version: str = "v1"
+    mappings: dict[str, Any]
+
+
+class SimilarCaseSearchCreate(BaseModel):
+    source_name: str | None = None
+    source_url: str | None = None
+    candidates: list[dict[str, Any]] | None = None
+
+
+class EvidenceMatrixCreate(BaseModel):
+    fact_claims: list[str] | None = None
+    title: str | None = None
+
+
+class EvidenceItemPatch(BaseModel):
+    title: str | None = None
+    proof_purpose: str | None = None
+    status: str | None = None
+    suggested_name: str | None = None
+
+
+class DraftDocumentCreate(BaseModel):
+    template: str = "execution_application"
+    title: str | None = None
+
+
+class DraftQualityCheckCreate(BaseModel):
+    options: dict[str, Any] | None = None
+
+
+class TranscriptSummaryCreate(BaseModel):
+    transcript_text: str
+    source_name: str | None = None
+    source_ref: dict[str, Any] | None = None
+
+
+class OrganizationCreate(BaseModel):
+    name: str
+    status: str = "active"
+    settings: dict[str, Any] | None = None
+
+
+class TeamCreate(BaseModel):
+    name: str
+    organization_id: str | None = None
+    status: str = "active"
+    settings: dict[str, Any] | None = None
+
+
+class TeamPolicyUpdate(BaseModel):
+    policies: dict[str, Any]
+
+
+class PluginRolloutCreate(BaseModel):
+    version: str | None = None
+    rollout_percent: int = 10
+
+
+class PluginRollbackCreate(BaseModel):
+    rollback_to_version: str | None = None
+
+
+class MigrationRunCreate(BaseModel):
+    dry_run: bool = True
+    steps: list[str] | None = None
+    rollback_plan: str | None = None
+
+
+class FeedbackInsightExtractCreate(BaseModel):
+    options: dict[str, Any] | None = None
+
+
+class EvaluationRunCreate(BaseModel):
+    target_version: str = "candidate"
+    baseline_version: str = "current"
+    baseline_score: float = 0.7
+    candidate_score: float = 0.72
+
+
+class ReviewStatusUpdate(BaseModel):
+    status: str = "reviewed"
+    comment: str | None = None
 
 
 class QAAcceptanceRunCreate(BaseModel):
@@ -224,6 +354,9 @@ def create_app(store: Store | None = None) -> FastAPI:
     store = store or Store(Path(".runtime/law_platform_store.json"))
     install_p0_features()
     install_ux_features()
+    from .p1_p2_features import install_p1_p2_features
+
+    install_p1_p2_features()
     platform = LawPlatform(store)
     app = FastAPI(title="Execution Case Asset Clue Workspace", version="0.1.0")
     app.state.platform = platform
@@ -585,6 +718,210 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.put("/api/data-source-configs/{connector_id}")
     def configure_data_source_endpoint(connector_id: str, payload: DataSourceConfigUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.configure_data_source(context, connector_id, model_data(payload)))
+
+    @app.get("/bff/team/operations-dashboard")
+    def team_operations_dashboard(status: str | None = None, case_id: str | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.team_operations_dashboard(context, status=status, case_id=case_id))
+
+    @app.get("/api/system-alerts")
+    def system_alerts(status: str | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.list_system_alerts(context, status))
+
+    @app.post("/api/system-alerts/{alert_id}/resolve")
+    def resolve_system_alert(alert_id: str, payload: SystemAlertResolve, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.resolve_system_alert(context, alert_id, model_data(payload)))
+
+    @app.get("/api/quality/metrics")
+    def quality_metrics(case_id: str | None = None, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.quality_metrics(context, case_id))
+
+    @app.get("/api/quality/feedback-samples")
+    def feedback_samples(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.feedback_samples(context))
+
+    @app.post("/api/quality/feedback-samples")
+    def create_feedback_sample(payload: FeedbackSampleCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_feedback_sample(context, model_data(payload)))
+
+    @app.get("/api/backup-checks")
+    def backup_checks(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.backup_checks(context))
+
+    @app.post("/api/backup-checks")
+    def create_backup_check(payload: BackupCheckCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_backup_check(context, model_data(payload)))
+
+    @app.post("/api/configs/{config_id}/rotate")
+    def rotate_config(config_id: str, payload: ConfigRotateRequest, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.rotate_config(context, config_id, model_data(payload)))
+
+    @app.get("/api/data-sources/catalog")
+    def data_sources_catalog(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.data_source_catalog(context))
+
+    @app.put("/api/data-sources/{source_id}")
+    def update_data_source(source_id: str, payload: DataSourceCatalogUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.update_data_source_catalog(context, source_id, model_data(payload)))
+
+    @app.post("/api/data-sources/{source_id}/health-check")
+    def run_data_source_health_check(source_id: str, payload: DataSourceHealthCheckCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.run_data_source_health_check(context, source_id, model_data(payload)))
+
+    @app.get("/api/data-sources/{source_id}/field-mappings")
+    def data_source_field_mappings(source_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.data_source_field_mappings(context, source_id))
+
+    @app.put("/api/data-sources/{source_id}/field-mappings")
+    def update_data_source_field_mappings(source_id: str, payload: FieldMappingUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.update_data_source_field_mappings(context, source_id, model_data(payload)))
+
+    @app.get("/api/data-sources/{source_id}/quality")
+    def data_source_quality(source_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.data_source_quality(context, source_id))
+
+    @app.get("/api/data-sources/costs")
+    def data_source_costs(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.data_source_costs(context))
+
+    @app.post("/api/cases/{case_id}/similar-cases/search")
+    def search_similar_cases(case_id: str, payload: SimilarCaseSearchCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.search_similar_cases(context, case_id, model_data(payload)))
+
+    @app.get("/api/cases/{case_id}/similar-cases")
+    def list_similar_cases(case_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.list_similar_cases(context, case_id))
+
+    @app.post("/api/cases/{case_id}/evidence-matrix")
+    def create_evidence_matrix(case_id: str, payload: EvidenceMatrixCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_evidence_matrix(context, case_id, model_data(payload)))
+
+    @app.get("/api/cases/{case_id}/evidence-matrix")
+    def evidence_matrix(case_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.evidence_matrix(context, case_id))
+
+    @app.patch("/api/evidence-items/{evidence_id}")
+    def update_evidence_item(evidence_id: str, payload: EvidenceItemPatch, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.update_evidence_item(context, evidence_id, model_data(payload)))
+
+    @app.post("/api/cases/{case_id}/draft-documents")
+    def create_draft_document(case_id: str, payload: DraftDocumentCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_draft_document(context, case_id, model_data(payload)))
+
+    @app.get("/api/draft-documents/{draft_id}")
+    def get_draft_document(draft_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.get_draft_document(context, draft_id))
+
+    @app.post("/api/draft-documents/{draft_id}/quality-check")
+    def run_draft_quality_check(draft_id: str, payload: DraftQualityCheckCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.run_draft_quality_check(context, draft_id, model_data(payload)))
+
+    @app.post("/api/cases/{case_id}/transcript-summaries")
+    def create_transcript_summary(case_id: str, payload: TranscriptSummaryCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_transcript_summary(context, case_id, model_data(payload)))
+
+    @app.get("/bff/cases/{case_id}/case-assistance")
+    def case_assistance(case_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.case_assistance(context, case_id))
+
+    @app.get("/api/organizations")
+    def organizations(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.organizations(context))
+
+    @app.post("/api/organizations")
+    def create_organization(payload: OrganizationCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_organization(context, model_data(payload)))
+
+    @app.get("/api/teams")
+    def teams(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.teams(context))
+
+    @app.post("/api/teams")
+    def create_team(payload: TeamCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_team(context, model_data(payload)))
+
+    @app.put("/api/teams/{team_id}/policies")
+    def update_team_policies(team_id: str, payload: TeamPolicyUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.update_team_policies(context, team_id, model_data(payload)))
+
+    @app.get("/api/platform/plugins")
+    def platform_plugins(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.platform_plugins(context))
+
+    @app.post("/api/platform/plugins/{plugin_id}/rollout")
+    def rollout_plugin(plugin_id: str, payload: PluginRolloutCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.rollout_plugin(context, plugin_id, model_data(payload)))
+
+    @app.post("/api/platform/plugins/{plugin_id}/rollback")
+    def rollback_plugin(plugin_id: str, payload: PluginRollbackCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.rollback_plugin(context, plugin_id, model_data(payload)))
+
+    @app.get("/api/platform/deployments/profiles")
+    def deployment_profiles(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.deployment_profiles(context))
+
+    @app.get("/api/platform/migrations")
+    def migration_runs(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.migration_runs(context))
+
+    @app.post("/api/platform/migrations/{version}/run")
+    def run_migration(version: str, payload: MigrationRunCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.run_migration(context, version, model_data(payload)))
+
+    @app.get("/api/platform/slo")
+    def platform_slo(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.platform_slo(context))
+
+    @app.get("/api/platform/costs")
+    def platform_costs(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.platform_costs(context))
+
+    @app.get("/api/platform/audit-archives")
+    def audit_archives(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.audit_archives(context))
+
+    @app.get("/api/knowledge/nodes")
+    def knowledge_nodes(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.knowledge_nodes(context))
+
+    @app.get("/api/knowledge/nodes/{node_id}")
+    def knowledge_node(node_id: str, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.knowledge_node(context, node_id))
+
+    @app.get("/api/knowledge/graph")
+    def knowledge_graph(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.knowledge_graph(context))
+
+    @app.post("/api/feedback/insights/extract")
+    def extract_feedback_insights(payload: FeedbackInsightExtractCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.extract_feedback_insights(context, model_data(payload)))
+
+    @app.get("/api/evaluations/runs")
+    def evaluation_runs(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.evaluation_runs(context))
+
+    @app.post("/api/evaluations/runs")
+    def create_evaluation_run(payload: EvaluationRunCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_evaluation_run(context, model_data(payload)))
+
+    @app.get("/api/business-leads")
+    def business_leads(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.business_leads(context))
+
+    @app.post("/api/business-leads/{lead_id}/review")
+    def review_business_lead(lead_id: str, payload: ReviewStatusUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.review_business_lead(context, lead_id, model_data(payload)))
+
+    @app.get("/api/policy-alerts")
+    def policy_alerts(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.policy_alerts(context))
+
+    @app.post("/api/policy-alerts/{alert_id}/review")
+    def review_policy_alert(alert_id: str, payload: ReviewStatusUpdate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.review_policy_alert(context, alert_id, model_data(payload)))
+
+    @app.get("/bff/management/dashboard")
+    def management_dashboard(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.management_dashboard(context))
     return app
 
 

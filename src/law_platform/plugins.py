@@ -60,6 +60,17 @@ class PluginManifest:
                 "required_outputs": ["markdown", "blocks", "page_no", "bbox", "block_confidence", "table_placeholders", "image_placeholders", "quality_summary"],
                 "prohibited_outputs": ["low_confidence_final_legal_conclusion", "missing_page_mapping"],
             }
+        if self.plugin_type == "DataConnector":
+            data["authorization"] = {
+                "type": "manual" if self.plugin_id == "manual_company_connector" else "api_key",
+                "expires_at": None,
+            }
+            data["quality"] = {
+                "freshness_window_days": 30,
+                "required_fields": ["source_name", "source_url", "record_type", "record_time", "fetched_at", "normalized_payload", "authorization_status"],
+            }
+            data["cost"] = {"billing_model": "unknown", "unit_cost": 0}
+            data["lineage"] = {"field_mapping_version": "v1"}
         if self.plugin_type == "ReportTemplate":
             data["template_contract"] = {
                 "report_type": "asset_clue",
@@ -226,6 +237,10 @@ class PluginService:
 
         if plugin_type == "DataConnector":
             add_check("data_connector_supports_L1", "L1" in levels, "data_connector_must_support_L1")
+            add_check("data_connector_authorization_contract", bool(plugin.get("authorization")), "data_connector_authorization_contract_missing", plugin.get("authorization"))
+            add_check("data_connector_quality_contract", bool(plugin.get("quality")), "data_connector_quality_contract_missing", plugin.get("quality"))
+            add_check("data_connector_cost_contract", bool(plugin.get("cost")), "data_connector_cost_contract_missing", plugin.get("cost"))
+            add_check("data_connector_lineage_contract", bool(plugin.get("lineage")), "data_connector_lineage_contract_missing", plugin.get("lineage"))
             if compliance.get("authorized_api_required"):
                 add_check("authorization_failure_path", "reject_missing_authorization" in declared_tests, "missing_authorization_failure_path")
             sample_records = self._records_for(plugin_id, {"id": "sample_subject", "name": "Sample Subject"}, {"id": "sample_case", "case_name": "Sample Case", "amount": "1000"})

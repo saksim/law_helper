@@ -78,11 +78,45 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     'runbook_checks': {'required': {'id', 'tenant_id', 'actor_id', 'check_key', 'status', 'created_at'}},
     'runbook_incidents': {'required': {'id', 'tenant_id', 'actor_id', 'incident_type', 'severity', 'status', 'summary', 'created_at'}},
     'model_invocations': {'required': {'id', 'tenant_id', 'actor_id', 'case_id', 'provider', 'sensitivity_level', 'input_summary', 'output_summary', 'review_status', 'created_at'}, 'enums': {'sensitivity_level': 'sensitivity_level', 'review_status': 'review_status'}},
+    'system_alerts': {'required': {'id', 'tenant_id', 'alert_type', 'severity', 'status', 'title', 'created_at'}},
+    'quality_metrics': {'required': {'id', 'tenant_id', 'metric_key', 'metric_value', 'created_at'}},
+    'feedback_samples': {'required': {'id', 'tenant_id', 'object_type', 'object_id', 'human_label', 'created_at'}},
+    'backup_checks': {'required': {'id', 'tenant_id', 'actor_id', 'status', 'created_at'}},
+    'config_rotations': {'required': {'id', 'tenant_id', 'actor_id', 'config_id', 'config_type', 'created_at'}},
+    'data_source_catalog': {'required': {'id', 'tenant_id', 'source_id', 'authorization_status', 'status', 'created_at'}},
+    'field_mappings': {'required': {'id', 'tenant_id', 'source_id', 'mapping_version', 'mappings', 'created_at'}},
+    'data_quality_scores': {'required': {'id', 'tenant_id', 'source_id', 'score', 'created_at'}},
+    'connector_health_checks': {'required': {'id', 'tenant_id', 'source_id', 'status', 'created_at'}},
+    'manual_record_attachments': {'required': {'id', 'tenant_id', 'external_record_id', 'created_at'}},
+    'source_cost_records': {'required': {'id', 'tenant_id', 'source_id', 'cost_type', 'amount', 'created_at'}},
+    'similar_cases': {'required': {'id', 'tenant_id', 'case_id', 'title', 'source_ref', 'created_at'}},
+    'legal_arguments': {'required': {'id', 'tenant_id', 'case_id', 'argument_type', 'source_ref', 'created_at'}},
+    'evidence_items': {'required': {'id', 'tenant_id', 'case_id', 'title', 'status', 'created_at'}},
+    'evidence_matrix_rows': {'required': {'id', 'tenant_id', 'case_id', 'fact_claim', 'status', 'created_at'}},
+    'draft_documents': {'required': {'id', 'tenant_id', 'case_id', 'template', 'title', 'content_md', 'review_status', 'created_at'}},
+    'document_quality_checks': {'required': {'id', 'tenant_id', 'draft_id', 'status', 'created_at'}},
+    'transcript_summaries': {'required': {'id', 'tenant_id', 'case_id', 'summary', 'review_status', 'created_at'}},
+    'organizations': {'required': {'id', 'tenant_id', 'name', 'status', 'created_at'}},
+    'teams': {'required': {'id', 'tenant_id', 'organization_id', 'name', 'status', 'created_at'}},
+    'tenant_policies': {'required': {'id', 'tenant_id', 'scope_type', 'scope_id', 'policies', 'created_at'}},
+    'plugin_versions': {'required': {'id', 'tenant_id', 'plugin_id', 'version', 'status', 'created_at'}},
+    'deployment_profiles': {'required': {'id', 'tenant_id', 'profile_name', 'profile_type', 'created_at'}},
+    'migration_runs': {'required': {'id', 'tenant_id', 'version', 'status', 'created_at'}},
+    'slo_metrics': {'required': {'id', 'tenant_id', 'metric_key', 'metric_value', 'status', 'created_at'}},
+    'cost_records': {'required': {'id', 'tenant_id', 'cost_type', 'amount', 'created_at'}},
+    'audit_archives': {'required': {'id', 'tenant_id', 'archive_scope', 'integrity_hash', 'created_at'}},
+    'knowledge_nodes': {'required': {'id', 'tenant_id', 'node_type', 'title', 'source_ref', 'created_at'}},
+    'knowledge_edges': {'required': {'id', 'tenant_id', 'source_node_id', 'target_node_id', 'relation_type', 'created_at'}},
+    'feedback_insights': {'required': {'id', 'tenant_id', 'insight_type', 'title', 'created_at'}},
+    'evaluation_runs': {'required': {'id', 'tenant_id', 'target_version', 'status', 'created_at'}},
+    'business_leads': {'required': {'id', 'tenant_id', 'title', 'status', 'source_ref', 'created_at'}},
+    'policy_alerts': {'required': {'id', 'tenant_id', 'title', 'status', 'source_ref', 'created_at'}},
+    'management_metrics': {'required': {'id', 'tenant_id', 'metric_key', 'metric_value', 'created_at'}},
 }
 
 
 FILE_TYPE_ALIASES = {'case_material': 'other', 'execution_notice': 'judgment', 'material': 'other'}
-SOURCE_CHANNEL_ALIASES = {'mobile_h5': 'mobile', 'app': 'mobile', 'mini_program': 'mobile'}
+SOURCE_CHANNEL_ALIASES = {'mobile_h5': 'mobile', 'app': 'mobile', 'mini_program': 'mobile', 'admin': 'web', 'bot': 'web'}
 ENTITY_TYPE_ALIASES = {'unified_social_credit_code': 'company', 'cause_of_action': 'case_no', 'execution_basis': 'case_no', 'party': 'person'}
 RELATION_ALIASES = {'case_party': 'related'}
 RECORD_TYPE_ALIASES = {'receivable': 'bid'}
