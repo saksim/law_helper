@@ -70,6 +70,7 @@ def seed_data() -> dict[str, list[dict[str, Any]]]:
         "plugin_runs": [],
         "review_records": [],
         "feedback_records": [],
+        "qa_acceptance_runs": [],
         "model_invocations": [],
         "audit_logs": [],
     }

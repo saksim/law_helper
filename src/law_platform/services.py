@@ -7,6 +7,7 @@ from .document_pipeline import DocumentPipeline
 from .errors import AppError
 from .models import TENANT_ID, money_to_text, new_id, now_iso
 from .plugins import PluginService
+from .qa_acceptance import acceptance_plan_payload, create_acceptance_run
 from .security import RequestContext, SecurityService
 from .store import Store
 
@@ -414,6 +415,30 @@ class LawPlatform:
     def model_invocations(self, ctx: RequestContext) -> list[dict[str, Any]]:
         self.security.require_role(ctx, {"owner", "admin", "auditor"})
         return [row for row in self.store.list("model_invocations") if row.get("tenant_id") == ctx.tenant_id]
+
+    def qa_acceptance_plan(self, ctx: RequestContext) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return acceptance_plan_payload()
+
+    def create_qa_acceptance_run(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer"})
+        run = create_acceptance_run(self.store, ctx.tenant_id, ctx.actor_id, payload)
+        self.security.audit(
+            ctx,
+            "qa_acceptance_run_created",
+            "qa_acceptance_run",
+            run["id"],
+            {
+                "status": run["status"],
+                "blocker_count": run["summary"]["blocker_count"],
+                "missing_evidence_count": run["summary"]["missing_evidence_count"],
+            },
+        )
+        return run
+
+    def qa_acceptance_runs(self, ctx: RequestContext) -> list[dict[str, Any]]:
+        self.security.require_role(ctx, {"owner", "admin", "reviewer", "auditor"})
+        return [row for row in self.store.list("qa_acceptance_runs") if row.get("tenant_id") == ctx.tenant_id]
 
     def data_dictionary(self, ctx: RequestContext) -> dict[str, Any]:
         self.security.require_role(ctx, {'owner', 'admin', 'lawyer', 'reviewer', 'auditor'})

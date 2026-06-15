@@ -143,6 +143,16 @@ class DataSourceConfigUpdate(BaseModel):
     default_record_type: str | None = None
 
 
+class QAAcceptanceRunCreate(BaseModel):
+    sample_counts: dict[str, Any] | None = None
+    test_results: dict[str, Any] | None = None
+    usability_results: dict[str, Any] | None = None
+    performance_results: dict[str, Any] | None = None
+    evidence_refs: dict[str, Any] | None = None
+    defects: list[dict[str, Any]] | None = None
+    release_risk_conclusion: str | None = None
+
+
 def model_data(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(exclude_none=True) if hasattr(model, "model_dump") else model.dict(exclude_none=True)
 
@@ -386,6 +396,18 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.get("/api/model-invocations")
     def model_invocations(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
         return ok(context, platform.model_invocations(context))
+
+    @app.get("/api/qa/acceptance-plan")
+    def qa_acceptance_plan(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.qa_acceptance_plan(context))
+
+    @app.post("/api/qa/acceptance-runs")
+    def create_qa_acceptance_run(payload: QAAcceptanceRunCreate, context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.create_qa_acceptance_run(context, model_data(payload)))
+
+    @app.get("/api/qa/acceptance-runs")
+    def qa_acceptance_runs(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
+        return ok(context, platform.qa_acceptance_runs(context))
 
     @app.get('/api/data-dictionary')
     def data_dictionary(context: RequestContext = Depends(ctx)) -> dict[str, Any]:
